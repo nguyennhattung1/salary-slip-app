@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quản lý Nhân sự & Xuất Phiếu Lương</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='style.css') }}"
+    />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Quản lý Nhân sự & Xuất Phiếu Lương</h1>
+        <p class="subtitle">
+          Upload file Excel, chọn nhân viên và xuất phiếu lương cá nhân
+        </p>
+      </header>
+
+      <!-- Upload Section -->
+      <section class="card upload-section">
+        <h2>📁 Upload File Excel</h2>
+        <form id="uploadForm" enctype="multipart/form-data">
+          <div class="file-input-wrapper">
+            <input type="file" id="fileInput" name="file" accept=".xlsx,.xls" />
+            <label for="fileInput" class="file-label">
+              <span class="file-icon">📄</span>
+              <span class="file-text">Chọn file Excel (.xlsx, .xls)</span>
+            </label>
+            <span id="fileName" class="file-name"></span>
+          </div>
+          <button type="submit" class="btn btn-primary">Upload</button>
+        </form>
+        <div id="uploadStatus" class="status-message"></div>
+        <div id="dataInfo" class="data-info" style="display: none">
+          <p>
+            <strong>Số nhân viên:</strong> <span id="employeeCount">0</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- Employee Selection Section -->
+      <section
+        class="card employee-section"
+        id="employeeSection"
+        style="display: none"
+      >
+        <h2>👤 Chọn Nhân viên</h2>
+        <div class="employee-select-row">
+          <select id="employeeSelect" class="employee-dropdown">
+            <option value="">-- Chọn nhân viên --</option>
+          </select>
+          <button
+            type="button"
+            class="btn btn-primary"
+            onclick="loadSelectedEmployee()"
+          >
+            Xem thông tin
+          </button>
+        </div>
+
+        <div class="search-alternative">
+          <p>Hoặc tìm kiếm theo từ khóa:</p>
+          <div class="search-row">
+            <input
+              type="text"
+              id="searchInput"
+              placeholder="Nhập tên hoặc thông tin cần tìm..."
+            />
+            <button
+              type="button"
+              class="btn btn-secondary"
+              onclick="searchEmployee()"
+            >
+              Tìm kiếm
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Results Section -->
+      <section
+        class="card results-section"
+        id="resultsSection"
+        style="display: none"
+      >
+        <h2>📋 Thông tin Nhân viên</h2>
+        <p class="result-count">
+          Tìm thấy <span id="resultCount">0</span> kết quả
+        </p>
+        <div id="resultsContainer"></div>
+      </section>
+    </div>
+
+    <script>
+      let employeesList = [];
+
+      // Get current month and year
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+
+      // File input display
+      document.getElementById('fileInput').addEventListener('change', function(e) {
+          const fileName = e.target.files[0]?.name || '';
+          document.getElementById('fileName').textContent = fileName;
+          document.querySelector('.file-text').textContent = fileName || 'Chọn file Excel (.xlsx, .xls)';
+      });
+
+      // Upload form
+      document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+          e.preventDefault();
+          const fileInput = document.getElementById('fileInput');
+          const statusDiv = document.getElementById('uploadStatus');
+
+          if (!fileInput.files[0]) {
+              statusDiv.innerHTML = '<span class="error">Vui lòng chọn file!</span>';
+              return;
+          }
+
+          const formData = new FormData();
+          formData.append('file', fileInput.files[0]);
+
+          statusDiv.innerHTML = '<span class="loading">Đang xử lý...</span>';
+
+          try {
+              const response = await fetch('/upload', {
+                  method: 'POST',
+                  body: formData
+              });
+              const data = await response.json();
+
+              if (data.success) {
+                  statusDiv.innerHTML = '<span class="success">' + data.message + '</span>';
+                  document.getElementById('employeeCount').textContent = data.total_employees;
+                  document.getElementById('dataInfo').style.display = 'block';
+                  document.getElementById('employeeSection').style.display = 'block';
+
+                  employeesList = data.employees_list || [];
+                  updateEmployeeDropdown(employeesList);
+              } else {
+                  statusDiv.innerHTML = '<span class="error">' + data.error + '</span>';
+              }
+          } catch (error) {
+              statusDiv.innerHTML = '<span class="error">Lỗi kết nối: ' + error.message + '</span>';
+          }
+      });
+
+      // Update employee dropdown
+      function updateEmployeeDropdown(employees) {
+          const select = document.getElementById('employeeSelect');
+          select.innerHTML = '<option value="">-- Chọn nhân viên --</option>';
+
+          employees.forEach(emp => {
+              const option = document.createElement('option');
+              option.value = emp.index;
+              option.textContent = emp.name;
+              select.appendChild(option);
+          });
+      }
+
+      // Load selected employee
+      async function loadSelectedEmployee() {
+          const select = document.getElementById('employeeSelect');
+          const index = select.value;
+
+          if (!index) {
+              alert('Vui lòng chọn nhân viên!');
+              return;
+          }
+
+          try {
+              const response = await fetch('/get_employee/' + index);
+              const data = await response.json();
+
+              if (data.success) {
+                  displayResults([data.result]);
+                  document.getElementById('resultCount').textContent = 1;
+                  document.getElementById('resultsSection').style.display = 'block';
+              } else {
+                  alert(data.error);
+              }
+          } catch (error) {
+              alert('Lỗi: ' + error.message);
+          }
+      }
+
+      // Search employee
+      async function searchEmployee() {
+          const searchTerm = document.getElementById('searchInput').value.trim();
+
+          if (!searchTerm) {
+              alert('Vui lòng nhập từ khóa tìm kiếm!');
+              return;
+          }
+
+          try {
+              const response = await fetch('/search', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({
+                      search_term: searchTerm,
+                      search_fields: []
+                  })
+              });
+              const data = await response.json();
+
+              if (data.success) {
+                  displayResults(data.results);
+                  document.getElementById('resultCount').textContent = data.count;
+                  document.getElementById('resultsSection').style.display = 'block';
+              } else {
+                  alert(data.error);
+                  document.getElementById('resultsSection').style.display = 'none';
+              }
+          } catch (error) {
+              alert('Lỗi: ' + error.message);
+          }
+      }
+
+      // Enter key search
+      document.getElementById('searchInput').addEventListener('keypress', function(e) {
+          if (e.key === 'Enter') {
+              searchEmployee();
+          }
+      });
+
+      // Build month options
+      function buildMonthOptions(selectedMonth) {
+          let options = '';
+          const months = [
+              'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
+              'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'
+          ];
+          for (let i = 1; i <= 12; i++) {
+              const selected = i === selectedMonth ? 'selected' : '';
+              options += `<option value="${i}" ${selected}>${months[i-1]}</option>`;
+          }
+          return options;
+      }
+
+      // Build year options
+      function buildYearOptions(selectedYear) {
+          let options = '';
+          for (let y = selectedYear - 5; y <= selectedYear + 1; y++) {
+              const selected = y === selectedYear ? 'selected' : '';
+              options += `<option value="${y}" ${selected}>${y}</option>`;
+          }
+          return options;
+      }
+
+      // Display search results
+      function displayResults(results) {
+          const container = document.getElementById('resultsContainer');
+          container.innerHTML = '';
+
+          results.forEach(result => {
+              const card = document.createElement('div');
+              card.className = 'result-card';
+
+              // Get employee name
+              let employeeName = 'Nhân viên';
+              for (const key of Object.keys(result.info)) {
+                  if (key.toLowerCase().includes('họ tên') || key.toLowerCase().includes('ho ten')) {
+                      employeeName = result.info[key];
+                      break;
+                  }
+              }
+
+              let html = `
+                  <div class="result-header">
+                      <h3>${employeeName}</h3>
+                  </div>
+              `;
+
+              // Info section
+              html += '<div class="result-section"><h4>Thông tin cá nhân</h4><div class="info-grid">';
+              for (const [key, value] of Object.entries(result.info)) {
+                  html += `<div class="info-item"><span class="info-label">${key}:</span><span class="info-value">${value}</span></div>`;
+              }
+              html += '</div></div>';
+
+              // Salary section
+              if (result.salary) {
+                  html += '<div class="result-section salary-section"><h4>Thông tin lương</h4><div class="info-grid">';
+                  for (const [key, value] of Object.entries(result.salary)) {
+                      let displayValue = value;
+                      const numValue = parseFloat(value);
+                      if (!isNaN(numValue) && numValue > 1000) {
+                          displayValue = numValue.toLocaleString('vi-VN');
+                      }
+                      html += `<div class="info-item"><span class="info-label">${key}:</span><span class="info-value">${displayValue}</span></div>`;
+                  }
+                  html += '</div></div>';
+              }
+
+              // Export section with month/year selection
+              html += `
+                  <div class="result-section export-section">
+                      <h4>📥 Xuất Phiếu Lương</h4>
+                      <div class="export-form">
+                          <div class="date-selectors">
+                              <div class="date-field">
+                                  <label>Tháng:</label>
+                                  <select id="month_${result.index}" class="date-select">
+                                      ${buildMonthOptions(currentMonth)}
+                                  </select>
+                              </div>
+                              <div class="date-field">
+                                  <label>Năm:</label>
+                                  <select id="year_${result.index}" class="date-select">
+                                      ${buildYearOptions(currentYear)}
+                                  </select>
+                              </div>
+                          </div>
+                          <div class="export-buttons">
+                              <button class="btn btn-excel" onclick="exportFile(${result.index}, 'excel')">
+                                  📊 Xuất Excel
+                              </button>
+                              <button class="btn btn-pdf" onclick="exportFile(${result.index}, 'pdf')">
+                                  📄 Xuất PDF
+                              </button>
+                          </div>
+                      </div>
+                  </div>
+              `;
+
+              card.innerHTML = html;
+              container.appendChild(card);
+          });
+      }
+
+      // Export file with month/year
+      function exportFile(index, type) {
+          const month = document.getElementById('month_' + index).value;
+          const year = document.getElementById('year_' + index).value;
+          window.location.href = `/export/${type}/${index}?month=${month}&year=${year}`;
+      }
+
+      // Initialize if data exists
+      {% if has_data %}
+      document.getElementById('employeeSection').style.display = 'block';
+      document.getElementById('dataInfo').style.display = 'block';
+      employeesList = {{ employees_list | tojson }};
+      updateEmployeeDropdown(employeesList);
+      {% endif %}
+    </script>
+  </body>
+</html>

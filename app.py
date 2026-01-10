@@ -27,16 +27,27 @@ app = Flask(__name__)
 app.secret_key = 'salary_report_secret_key_2024'
 
 # Register Vietnamese font for PDF
-FONT_PATH = os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSans.ttf')
+FONT_DIR = os.path.join(os.path.dirname(__file__), 'fonts')
 VIETNAMESE_FONT_AVAILABLE = False
+VIETNAMESE_FONT_NAME = 'Helvetica'  # Default fallback
 
-try:
-    if os.path.exists(FONT_PATH):
-        pdfmetrics.registerFont(TTFont('DejaVuSans', FONT_PATH))
-        VIETNAMESE_FONT_AVAILABLE = True
-        print(f"Vietnamese font loaded: {FONT_PATH}")
-except Exception as e:
-    print(f"Could not load Vietnamese font: {e}")
+# Try different fonts in order of preference
+font_options = [
+    ('ArialUnicode.ttf', 'ArialUnicode'),
+    ('DejaVuSans.ttf', 'DejaVuSans'),
+]
+
+for font_file, font_name in font_options:
+    font_path = os.path.join(FONT_DIR, font_file)
+    try:
+        if os.path.exists(font_path):
+            pdfmetrics.registerFont(TTFont(font_name, font_path))
+            VIETNAMESE_FONT_AVAILABLE = True
+            VIETNAMESE_FONT_NAME = font_name
+            print(f"Vietnamese font loaded: {font_path}")
+            break
+    except Exception as e:
+        print(f"Could not load font {font_file}: {e}")
 
 # Global storage for uploaded data
 data_store = {
@@ -634,7 +645,7 @@ def generate_pdf_salary_slip(employee_index, month, year):
     styles = getSampleStyleSheet()
     
     # Use Vietnamese font if available
-    font_name = 'DejaVuSans' if VIETNAMESE_FONT_AVAILABLE else 'Helvetica'
+    font_name = VIETNAMESE_FONT_NAME if VIETNAMESE_FONT_AVAILABLE else 'Helvetica'
     
     # Helper function for text - use Vietnamese if font available
     def vn_text(text):
@@ -775,6 +786,10 @@ def generate_pdf_salary_slip(employee_index, month, year):
 
 def send_email_with_attachment(to_email, subject, body, attachment_data, attachment_filename):
     """Send email with attachment using SMTP"""
+    from email.header import Header
+    from email.utils import encode_rfc2231
+    import unicodedata
+    
     if not EMAIL_CONFIG['sender_email'] or not EMAIL_CONFIG['sender_password']:
         return False, "Chưa cấu hình email gửi. Vui lòng cấu hình SMTP_SERVER, SENDER_EMAIL, SENDER_PASSWORD."
     
@@ -782,14 +797,35 @@ def send_email_with_attachment(to_email, subject, body, attachment_data, attachm
         msg = MIMEMultipart()
         msg['From'] = EMAIL_CONFIG['sender_email']
         msg['To'] = to_email
-        msg['Subject'] = subject
+        msg['Subject'] = Header(subject, 'utf-8')
         
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        attachment = MIMEBase('application', 'octet-stream')
+        # Determine MIME type based on file extension
+        if attachment_filename.lower().endswith('.pdf'):
+            mime_type = 'application/pdf'
+        elif attachment_filename.lower().endswith('.xlsx'):
+            mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            mime_type = 'application/octet-stream'
+        
+        main_type, sub_type = mime_type.split('/', 1)
+        attachment = MIMEBase(main_type, sub_type)
         attachment.set_payload(attachment_data)
         encoders.encode_base64(attachment)
-        attachment.add_header('Content-Disposition', f'attachment; filename="{attachment_filename}"')
+        
+        # Properly encode filename for Vietnamese characters using RFC 2231
+        # Create ASCII-safe filename for Content-Disposition
+        ascii_filename = unicodedata.normalize('NFKD', attachment_filename).encode('ascii', 'ignore').decode('ascii')
+        if not ascii_filename:
+            ascii_filename = 'PhieuLuong' + ('.pdf' if '.pdf' in attachment_filename else '.xlsx')
+        
+        # Use RFC 2231 encoding for the actual filename with Vietnamese
+        attachment.add_header(
+            'Content-Disposition', 
+            'attachment',
+            filename=('utf-8', '', attachment_filename)
+        )
         msg.attach(attachment)
         
         server = smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port'])
@@ -1330,6 +1366,6 @@ def get_columns():
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5001))
+    port = int(os.environ.get('PORT', 5002))
     debug = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     app.run(debug=debug, host='0.0.0.0', port=port)

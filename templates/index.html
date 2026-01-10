@@ -41,36 +41,70 @@
       </section>
 
       <!-- Email Configuration Section -->
-      <section class="card email-config-section" id="emailConfigSection" style="display: none">
+      <section
+        class="card email-config-section"
+        id="emailConfigSection"
+        style="display: none"
+      >
         <h2>📧 Cấu hình Email</h2>
         <div class="email-config-form">
           <div class="form-row">
             <div class="form-group">
               <label>SMTP Server:</label>
-              <input type="text" id="smtpServer" value="smtp.gmail.com" placeholder="smtp.gmail.com">
+              <input
+                type="text"
+                id="smtpServer"
+                value="smtp.gmail.com"
+                placeholder="smtp.gmail.com"
+              />
             </div>
             <div class="form-group">
               <label>Port:</label>
-              <input type="number" id="smtpPort" value="587" placeholder="587">
+              <input
+                type="number"
+                id="smtpPort"
+                value="587"
+                placeholder="587"
+              />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
               <label>Email gửi:</label>
-              <input type="email" id="senderEmail" placeholder="your-email@gmail.com">
+              <input
+                type="email"
+                id="senderEmail"
+                placeholder="your-email@gmail.com"
+              />
             </div>
             <div class="form-group">
               <label>App Password:</label>
-              <input type="password" id="senderPassword" placeholder="App Password (không phải mật khẩu Gmail)">
+              <input
+                type="password"
+                id="senderPassword"
+                placeholder="App Password (không phải mật khẩu Gmail)"
+              />
             </div>
           </div>
           <div class="form-actions">
-            <button type="button" class="btn btn-primary" onclick="saveEmailConfig()">💾 Lưu cấu hình</button>
+            <button
+              type="button"
+              class="btn btn-primary"
+              onclick="saveEmailConfig()"
+            >
+              💾 Lưu cấu hình
+            </button>
             <span id="emailConfigStatus" class="status-text"></span>
           </div>
           <p class="help-text">
-            <strong>Lưu ý:</strong> Với Gmail, bạn cần tạo <a href="https://support.google.com/accounts/answer/185833" target="_blank">App Password</a> 
-            (không dùng mật khẩu Gmail thường). Bật 2FA trước khi tạo App Password.
+            <strong>Lưu ý:</strong> Với Gmail, bạn cần tạo
+            <a
+              href="https://support.google.com/accounts/answer/185833"
+              target="_blank"
+              >App Password</a
+            >
+            (không dùng mật khẩu Gmail thường). Bật 2FA trước khi tạo App
+            Password.
           </p>
         </div>
       </section>
@@ -97,10 +131,18 @@
             </div>
           </div>
           <div class="bulk-actions">
-            <button type="button" class="btn btn-excel" onclick="downloadAllSlips()">
+            <button
+              type="button"
+              class="btn btn-excel"
+              onclick="downloadAllSlips()"
+            >
               📥 Tải tất cả phiếu lương
             </button>
-            <button type="button" class="btn btn-email" onclick="sendAllEmails()">
+            <button
+              type="button"
+              class="btn btn-email"
+              onclick="sendAllEmails()"
+            >
               📨 Gửi email tất cả
             </button>
           </div>
@@ -174,7 +216,7 @@
       function initDateSelectors() {
           const bulkMonth = document.getElementById('bulkMonth');
           const bulkYear = document.getElementById('bulkYear');
-          
+
           bulkMonth.innerHTML = buildMonthOptions(currentMonth);
           bulkYear.innerHTML = buildYearOptions(currentYear);
       }
@@ -360,7 +402,7 @@
               // Get employee name and email
               let employeeName = 'Nhân viên';
               let employeeEmail = result.email || null;
-              
+
               for (const key of Object.keys(result.info)) {
                   if (key.toLowerCase().includes('họ tên') || key.toLowerCase().includes('ho ten')) {
                       employeeName = result.info[key];
@@ -481,11 +523,11 @@
           const fileType = document.getElementById('emailFileType_' + index).value;
           const statusDiv = document.getElementById('emailStatus_' + index);
           const sendBtn = document.getElementById('sendBtn_' + index);
-          
+
           sendBtn.disabled = true;
           sendBtn.textContent = '⏳ Đang gửi...';
           statusDiv.innerHTML = '<span class="loading">Đang gửi email...</span>';
-          
+
           try {
               const response = await fetch('/send_email/' + index, {
                   method: 'POST',
@@ -499,7 +541,7 @@
                   })
               });
               const data = await response.json();
-              
+
               if (data.success) {
                   statusDiv.innerHTML = '<span class="success">✓ ' + data.message + '</span>';
                   emailStatusMap[index] = data.email_status;
@@ -515,7 +557,7 @@
           } catch (error) {
               statusDiv.innerHTML = '<span class="error">✗ Lỗi: ' + error.message + '</span>';
           }
-          
+
           sendBtn.disabled = false;
           sendBtn.textContent = '📨 Gửi phiếu lương';
       }
@@ -528,11 +570,11 @@
               sender_email: document.getElementById('senderEmail').value,
               sender_password: document.getElementById('senderPassword').value
           };
-          
+
           const statusSpan = document.getElementById('emailConfigStatus');
           statusSpan.textContent = 'Đang lưu...';
           statusSpan.className = 'status-text loading';
-          
+
           try {
               const response = await fetch('/configure_email', {
                   method: 'POST',
@@ -542,7 +584,7 @@
                   body: JSON.stringify(config)
               });
               const data = await response.json();
-              
+
               if (data.success) {
                   statusSpan.textContent = '✓ ' + data.message;
                   statusSpan.className = 'status-text success';
@@ -562,10 +604,10 @@
           const year = document.getElementById('bulkYear').value;
           const fileType = document.getElementById('bulkFileType').value;
           const statusDiv = document.getElementById('bulkStatus');
-          
+
           statusDiv.style.display = 'block';
           statusDiv.innerHTML = '<span class="loading">⏳ Đang tạo file ZIP chứa tất cả phiếu lương...</span>';
-          
+
           try {
               const response = await fetch('/export/bulk', {
                   method: 'POST',
@@ -579,7 +621,7 @@
                       year: parseInt(year)
                   })
               });
-              
+
               if (response.ok) {
                   const blob = await response.blob();
                   const url = window.URL.createObjectURL(blob);
@@ -606,14 +648,14 @@
           const year = document.getElementById('bulkYear').value;
           const fileType = document.getElementById('bulkFileType').value;
           const statusDiv = document.getElementById('bulkStatus');
-          
+
           if (!confirm(`Bạn có chắc muốn gửi email phiếu lương tháng ${month}/${year} cho TẤT CẢ nhân viên?`)) {
               return;
           }
-          
+
           statusDiv.style.display = 'block';
           statusDiv.innerHTML = '<span class="loading">⏳ Đang gửi email cho tất cả nhân viên...</span>';
-          
+
           try {
               const response = await fetch('/send_email_bulk', {
                   method: 'POST',
@@ -628,17 +670,17 @@
                   })
               });
               const data = await response.json();
-              
+
               if (data.success) {
                   let html = `<div class="bulk-result">
                       <p class="success-summary">✓ ${data.message}</p>
                       <div class="result-details">`;
-                  
+
                   data.results.forEach(r => {
                       const statusClass = r.success ? 'success' : 'error';
                       const icon = r.success ? '✓' : '✗';
                       html += `<div class="result-item ${statusClass}">${icon} ${r.name}: ${r.message}</div>`;
-                      
+
                       // Update email status map
                       if (r.success) {
                           emailStatusMap[r.index] = {
@@ -649,7 +691,7 @@
                           };
                       }
                   });
-                  
+
                   html += '</div></div>';
                   statusDiv.innerHTML = html;
               } else {

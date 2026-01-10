@@ -41,8 +41,12 @@
       </section>
 
       <!-- Email Status Summary Section -->
-      <section class="card email-summary-section" id="emailSummarySection" style="display: none">
-        <h2>Trạng thái gửi Email</h2>
+      <section
+        class="card email-summary-section"
+        id="emailSummarySection"
+        style="display: none"
+      >
+        <h2>Trạng thái gửi Email & Gửi hàng loạt</h2>
         <div class="email-summary">
           <div class="summary-stats">
             <div class="stat-item stat-total">
@@ -62,16 +66,50 @@
               <span class="stat-value" id="statFailed">0</span>
             </div>
           </div>
+          
+          <!-- Bulk email options -->
+          <div class="bulk-email-options">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Tháng:</label>
+                <select id="emailMonth" class="date-select"></select>
+              </div>
+              <div class="form-group">
+                <label>Năm:</label>
+                <select id="emailYear" class="date-select"></select>
+              </div>
+              <div class="form-group">
+                <label>Loại file:</label>
+                <select id="emailFileType" class="date-select">
+                  <option value="pdf">PDF</option>
+                  <option value="excel">Excel</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          
           <div class="email-list-toggle">
             <button type="button" class="btn btn-secondary" onclick="showEmailList('all')">Xem tất cả</button>
             <button type="button" class="btn btn-secondary" onclick="showEmailList('pending')">Xem chưa gửi</button>
             <button type="button" class="btn btn-secondary" onclick="showEmailList('sent')">Xem đã gửi</button>
           </div>
+          
           <div id="emailListContainer" class="email-list-container" style="display: none">
+            <div class="select-actions">
+              <label class="checkbox-label">
+                <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()">
+                <span>Chọn tất cả</span>
+              </label>
+              <span class="selected-count">Đã chọn: <strong id="selectedCount">0</strong></span>
+              <button type="button" class="btn btn-email" onclick="sendSelectedEmails()" id="sendSelectedBtn" disabled>
+                Gửi cho nhân viên đã chọn
+              </button>
+            </div>
             <table class="email-status-table">
               <thead>
                 <tr>
-                  <th>STT</th>
+                  <th class="col-checkbox">Chọn</th>
+                  <th class="col-stt">STT</th>
                   <th>Họ tên</th>
                   <th>Email</th>
                   <th>Trạng thái</th>
@@ -81,6 +119,8 @@
               <tbody id="emailListBody"></tbody>
             </table>
           </div>
+          
+          <div id="bulkEmailStatus" class="bulk-status" style="display: none"></div>
         </div>
       </section>
 
@@ -256,13 +296,20 @@
       const currentMonth = now.getMonth() + 1;
       const currentYear = now.getFullYear();
 
+      // Selected employees for bulk email
+      let selectedEmployees = new Set();
+
       // Initialize month/year selectors
       function initDateSelectors() {
           const bulkMonth = document.getElementById('bulkMonth');
           const bulkYear = document.getElementById('bulkYear');
+          const emailMonth = document.getElementById('emailMonth');
+          const emailYear = document.getElementById('emailYear');
 
           bulkMonth.innerHTML = buildMonthOptions(currentMonth);
           bulkYear.innerHTML = buildYearOptions(currentYear);
+          emailMonth.innerHTML = buildMonthOptions(currentMonth);
+          emailYear.innerHTML = buildYearOptions(currentYear);
       }
 
       // File input display
@@ -322,7 +369,7 @@
           const total = employeesList.length;
           let sent = 0;
           let failed = 0;
-          
+
           for (const emp of employeesList) {
               const status = emailStatusMap[emp.index];
               if (status) {
@@ -333,20 +380,29 @@
                   }
               }
           }
-          
+
           const pending = total - sent - failed;
-          
+
           document.getElementById('statTotal').textContent = total;
           document.getElementById('statSent').textContent = sent;
           document.getElementById('statPending').textContent = pending;
           document.getElementById('statFailed').textContent = failed;
       }
 
+      // Current filter for email list
+      let currentEmailFilter = 'all';
+
       // Show email list by filter
       function showEmailList(filter) {
+          currentEmailFilter = filter;
           const container = document.getElementById('emailListContainer');
           const tbody = document.getElementById('emailListBody');
           container.style.display = 'block';
+          
+          // Clear selection when changing filter
+          selectedEmployees.clear();
+          updateSelectedCount();
+          document.getElementById('selectAllCheckbox').checked = false;
           
           let html = '';
           let count = 0;
@@ -370,15 +426,25 @@
               }
               
               // Apply filter
-              if (filter === 'pending' && status) return;
+              if (filter === 'pending' && status && status.success) return;
               if (filter === 'sent' && (!status || !status.success)) return;
               
               count++;
+              const hasEmail = emp.email ? true : false;
+              const checkboxDisabled = hasEmail ? '' : 'disabled';
+              
               html += `
-                  <tr>
+                  <tr data-index="${emp.index}" class="${!hasEmail ? 'no-email-row' : ''}">
+                      <td class="col-checkbox">
+                          <input type="checkbox" 
+                                 class="emp-checkbox" 
+                                 data-index="${emp.index}" 
+                                 onchange="toggleEmployeeSelect(${emp.index})"
+                                 ${checkboxDisabled}>
+                      </td>
                       <td>${count}</td>
                       <td>${emp.name}</td>
-                      <td>${emp.email || 'Không có'}</td>
+                      <td>${emp.email || '<span class="no-email-text">Không có email</span>'}</td>
                       <td><span class="${statusClass}">${statusText}</span></td>
                       <td>${timeText}</td>
                   </tr>
@@ -386,10 +452,132 @@
           });
           
           if (!html) {
-              html = '<tr><td colspan="5" style="text-align:center">Không có dữ liệu</td></tr>';
+              html = '<tr><td colspan="6" style="text-align:center">Không có dữ liệu</td></tr>';
           }
           
           tbody.innerHTML = html;
+      }
+
+      // Toggle select all checkboxes
+      function toggleSelectAll() {
+          const selectAll = document.getElementById('selectAllCheckbox').checked;
+          const checkboxes = document.querySelectorAll('.emp-checkbox:not(:disabled)');
+          
+          selectedEmployees.clear();
+          
+          checkboxes.forEach(cb => {
+              cb.checked = selectAll;
+              if (selectAll) {
+                  selectedEmployees.add(parseInt(cb.dataset.index));
+              }
+          });
+          
+          updateSelectedCount();
+      }
+
+      // Toggle single employee selection
+      function toggleEmployeeSelect(index) {
+          if (selectedEmployees.has(index)) {
+              selectedEmployees.delete(index);
+          } else {
+              selectedEmployees.add(index);
+          }
+          updateSelectedCount();
+          
+          // Update select all checkbox
+          const checkboxes = document.querySelectorAll('.emp-checkbox:not(:disabled)');
+          const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+          document.getElementById('selectAllCheckbox').checked = allChecked;
+      }
+
+      // Update selected count display
+      function updateSelectedCount() {
+          const count = selectedEmployees.size;
+          document.getElementById('selectedCount').textContent = count;
+          document.getElementById('sendSelectedBtn').disabled = count === 0;
+      }
+
+      // Send emails to selected employees
+      async function sendSelectedEmails() {
+          if (selectedEmployees.size === 0) {
+              alert('Vui lòng chọn ít nhất một nhân viên!');
+              return;
+          }
+          
+          const month = document.getElementById('emailMonth').value;
+          const year = document.getElementById('emailYear').value;
+          const fileType = document.getElementById('emailFileType').value;
+          const statusDiv = document.getElementById('bulkEmailStatus');
+          const sendBtn = document.getElementById('sendSelectedBtn');
+          
+          const selectedList = Array.from(selectedEmployees);
+          const selectedNames = selectedList.map(idx => {
+              const emp = employeesList.find(e => e.index === idx);
+              return emp ? emp.name : idx;
+          }).join(', ');
+          
+          if (!confirm(`Bạn có chắc muốn gửi email phiếu lương tháng ${month}/${year} cho ${selectedEmployees.size} nhân viên?\n\nDanh sách: ${selectedNames}`)) {
+              return;
+          }
+          
+          statusDiv.style.display = 'block';
+          statusDiv.innerHTML = '<span class="loading">Đang gửi email cho ' + selectedEmployees.size + ' nhân viên...</span>';
+          sendBtn.disabled = true;
+          
+          try {
+              const response = await fetch('/send_email_bulk', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({
+                      indices: selectedList,
+                      file_type: fileType,
+                      month: parseInt(month),
+                      year: parseInt(year)
+                  })
+              });
+              const data = await response.json();
+              
+              if (data.success) {
+                  let html = `<div class="bulk-result">
+                      <p class="success-summary">${data.message}</p>
+                      <div class="result-details">`;
+                  
+                  data.results.forEach(r => {
+                      const statusClass = r.success ? 'success' : 'error';
+                      const icon = r.success ? '[OK]' : '[X]';
+                      html += `<div class="result-item ${statusClass}">${icon} ${r.name}: ${r.message}</div>`;
+                      
+                      // Update email status map
+                      emailStatusMap[r.index] = {
+                          sent: true,
+                          success: r.success,
+                          message: r.message,
+                          time: new Date().toLocaleString('vi-VN')
+                      };
+                  });
+                  
+                  html += '</div></div>';
+                  statusDiv.innerHTML = html;
+                  
+                  // Clear selection and refresh
+                  selectedEmployees.clear();
+                  updateSelectedCount();
+                  document.getElementById('selectAllCheckbox').checked = false;
+                  
+                  // Update summary, dropdown, and refresh list
+                  updateEmailSummary();
+                  updateEmployeeDropdown(employeesList);
+                  showEmailList(currentEmailFilter);
+              } else {
+                  statusDiv.innerHTML = '<span class="error">' + data.error + '</span>';
+              }
+          } catch (error) {
+              statusDiv.innerHTML = '<span class="error">Lỗi: ' + error.message + '</span>';
+          }
+          
+          sendBtn.disabled = selectedEmployees.size === 0;
       }
 
       // Update employee dropdown with email status
@@ -400,7 +588,7 @@
           employees.forEach(emp => {
               const option = document.createElement('option');
               option.value = emp.index;
-              
+
               // Show email status in dropdown
               const status = emailStatusMap[emp.index];
               let statusMark = '';
@@ -409,7 +597,7 @@
               } else {
                   statusMark = ' [CHUA GUI]';
               }
-              
+
               let text = emp.name + statusMark;
               if (emp.email) {
                   text += ` - ${emp.email}`;
@@ -827,7 +1015,7 @@
 
                   html += '</div></div>';
                   statusDiv.innerHTML = html;
-                  
+
                   // Update summary and dropdown
                   updateEmailSummary();
                   updateEmployeeDropdown(employeesList);

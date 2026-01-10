@@ -1,10 +1,17 @@
 """
 Flask Application for Employee Information Management and Salary Report Export
+Features: Vietnamese PDF, Email sending, Bulk download, Email status tracking
 """
 from flask import Flask, render_template, request, jsonify, send_file, session
 import pandas as pd
 import os
 import io
+import zipfile
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 from datetime import datetime
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -19,16 +26,37 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 app = Flask(__name__)
 app.secret_key = 'salary_report_secret_key_2024'
 
+# Register Vietnamese font for PDF
+FONT_PATH = os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSans.ttf')
+VIETNAMESE_FONT_AVAILABLE = False
+
+try:
+    if os.path.exists(FONT_PATH):
+        pdfmetrics.registerFont(TTFont('DejaVuSans', FONT_PATH))
+        VIETNAMESE_FONT_AVAILABLE = True
+        print(f"Vietnamese font loaded: {FONT_PATH}")
+except Exception as e:
+    print(f"Could not load Vietnamese font: {e}")
+
 # Global storage for uploaded data
 data_store = {
     'thong_tin': None,
     'luong': None,
     'columns_thong_tin': [],
     'columns_luong': [],
-    'employees_list': []
+    'employees_list': [],
+    'email_status': {}  # Track email status per employee: {index: {'sent': bool, 'success': bool, 'message': str, 'time': str}}
 }
 
-# Vietnamese to ASCII mapping for PDF
+# Email configuration (can be overridden via environment variables)
+EMAIL_CONFIG = {
+    'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.gmail.com'),
+    'smtp_port': int(os.environ.get('SMTP_PORT', 587)),
+    'sender_email': os.environ.get('SENDER_EMAIL', ''),
+    'sender_password': os.environ.get('SENDER_PASSWORD', ''),  # For Gmail, use App Password
+}
+
+# Vietnamese to ASCII mapping for fallback
 VIETNAMESE_MAP = {
     'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
     'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
@@ -60,7 +88,7 @@ VIETNAMESE_MAP = {
 
 
 def remove_accents(text):
-    """Convert Vietnamese text to ASCII for PDF compatibility"""
+    """Convert Vietnamese text to ASCII for PDF fallback"""
     result = ''
     for char in str(text):
         result += VIETNAMESE_MAP.get(char, char)
@@ -131,18 +159,15 @@ def clean_dataframe(df, sheet_name):
                 break
         
         if header_row is not None:
-            # Get main headers and sub-headers
             main_headers = df.iloc[header_row].tolist()
             sub_headers = df.iloc[header_row + 1].tolist() if header_row + 1 < len(df) else [None] * len(main_headers)
             
-            # Combine headers - use sub-header if main is Unnamed
             combined_headers = []
             last_valid_main = ''
             for i, (main, sub) in enumerate(zip(main_headers, sub_headers)):
                 main_str = str(main).strip() if pd.notna(main) and not str(main).startswith('Unnamed') else ''
                 sub_str = str(sub).strip() if pd.notna(sub) and not str(sub).startswith('Unnamed') else ''
                 
-                # Skip numeric headers
                 try:
                     if main_str and float(main_str):
                         main_str = ''
@@ -168,7 +193,6 @@ def clean_dataframe(df, sheet_name):
                 
                 combined_headers.append(combined)
             
-            # Skip the number row if exists
             data_start = header_row + 2
             if data_start < len(df):
                 check_row = df.iloc[data_start]
@@ -179,14 +203,10 @@ def clean_dataframe(df, sheet_name):
             df = df.iloc[data_start:]
             df.columns = combined_headers
         
-        # Remove columns starting with _
         cols_to_keep = [col for col in df.columns if not str(col).startswith('_')]
         df = df[cols_to_keep]
-        
-        # Remove completely empty rows
         df = df.dropna(how='all')
         
-        # Only keep rows where STT is a valid number >= 1
         stt_col = None
         for col in df.columns:
             if 'STT' in str(col).upper():
@@ -200,7 +220,6 @@ def clean_dataframe(df, sheet_name):
         df = df.reset_index(drop=True)
     
     elif 'lương' in sheet_name.lower() or 'luong' in sheet_name.lower():
-        # Find header rows
         header_row = None
         for i in range(min(5, len(df))):
             row = df.iloc[i]
@@ -256,10 +275,8 @@ def clean_dataframe(df, sheet_name):
         
         cols_to_keep = [col for col in df.columns if not str(col).startswith('_')]
         df = df[cols_to_keep]
-        
         df = df.dropna(how='all')
         
-        # Only keep rows where STT is valid
         stt_col = None
         for col in df.columns:
             if 'STT' in str(col).upper():
@@ -284,75 +301,72 @@ def find_employee_name_column(df):
     return None
 
 
+def find_employee_email_column(df):
+    """Find the column that contains employee email"""
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if 'email' in col_lower or 'mail' in col_lower or 'e-mail' in col_lower:
+            return col
+    return None
+
+
 def get_employees_list(df):
     """Get list of employees from dataframe"""
     name_col = find_employee_name_column(df)
+    email_col = find_employee_email_column(df)
+    
     if name_col is None:
         return []
     
     employees = []
     for idx, row in df.iterrows():
         name = row[name_col]
+        email = row[email_col] if email_col and email_col in row.index else None
         if pd.notna(name) and str(name).strip():
-            employees.append({
+            emp_data = {
                 'index': int(idx),
                 'name': str(name).strip()
-            })
+            }
+            if email and pd.notna(email) and '@' in str(email):
+                emp_data['email'] = str(email).strip()
+            employees.append(emp_data)
     return employees
 
 
 def get_salary_slip_data(employee_info, salary_data, df_info, df_luong):
     """Extract salary slip data from employee info and salary data"""
-    
-    # Field mappings based on user requirements:
-    # Họ tên = Họ tên
-    # Lương thỏa thuận = Thuế TNCN - Tổng Thu Nhập
-    # Lương đóng = Lương cơ bản
-    # Số tài khoản = Số tài khoản ngân hàng
-    # Tên ngân hàng = Tại ngân hàng - Chi nhánh
-    # Lương thực tế = Thuế TNCN - Tổng Thu Nhập (same as luong_thoa_thuan)
-    # BHXH = Các khoản Người Lao Động phải nộp cho CQNN - Tổng cộng
-    # Đoàn phí = Kinh phí Công Đoàn - Phí đoàn viên
-    # Thuế TNCN = Thuế TNCN - Thuế TNCN phải nộp
-    # Tổng Số Tiền Lương Thực Nhận = Tổng Cộng Thu Nhập - Tổng Cộng Khoản Trừ
-    
     data = {
         'ho_ten': '',
-        'luong_thoa_thuan': 0,  # Thuế TNCN - Tổng Thu Nhập
-        'luong_dong': 0,        # Lương cơ bản
+        'luong_thoa_thuan': 0,
+        'luong_dong': 0,
         'so_tai_khoan': '',
         'ten_ngan_hang': '',
-        'luong_thuc_te': 0,     # Thuế TNCN - Tổng Thu Nhập (same as luong_thoa_thuan)
-        'bhxh': 0,              # Các khoản NLĐ phải nộp - Tổng cộng
-        'doan_phi': 0,          # Kinh phí Công Đoàn - Phí đoàn viên
-        'thue_tncn': 0,         # Thuế TNCN - Thuế TNCN phải nộp
+        'luong_thuc_te': 0,
+        'bhxh': 0,
+        'doan_phi': 0,
+        'thue_tncn': 0,
     }
     
-    # Get employee name from info
     name_col = find_employee_name_column(df_info)
     if name_col and name_col in employee_info.index:
         val = employee_info[name_col]
         if pd.notna(val):
             data['ho_ten'] = str(val)
     
-    # Get bank info from employee info
     for col in employee_info.index:
         val = employee_info[col]
         col_lower = str(col).lower()
         if pd.notna(val):
-            # Số tài khoản ngân hàng
             if 'số tài khoản' in col_lower and 'ngân hàng' in col_lower:
                 data['so_tai_khoan'] = str(val)
             elif 'số tài khoản' in col_lower and not data['so_tai_khoan']:
                 data['so_tai_khoan'] = str(val)
             
-            # Tại ngân hàng - Chi nhánh
             if 'tại ngân hàng' in col_lower or ('ngân hàng' in col_lower and 'chi nhánh' in col_lower):
                 data['ten_ngan_hang'] = str(val)
             elif 'ngân hàng' in col_lower and 'số' not in col_lower and not data['ten_ngan_hang']:
                 data['ten_ngan_hang'] = str(val)
     
-    # Get salary data
     if salary_data is not None:
         for col in salary_data.index:
             val = salary_data[col]
@@ -364,45 +378,429 @@ def get_salary_slip_data(employee_info, salary_data, df_info, df_luong):
                 except:
                     num_val = 0
                 
-                # Lương thỏa thuận & Lương thực tế = Thuế TNCN - Tổng Thu Nhập
-                # Match exactly: "Thuế TNCN - Tổng Thu Nhập" (not containing chưa, chịu, tính, bao gồm)
                 if ('thuế tncn' in col_lower and 'tổng thu nhập' in col_lower and 
                     'chưa' not in col_lower and 'chịu' not in col_lower and 
                     'tính' not in col_lower and 'bao gồm' not in col_lower):
                     data['luong_thoa_thuan'] = num_val
                     data['luong_thuc_te'] = num_val
                 
-                # Lương đóng = Lương cơ bản
                 if 'lương cơ bản' in col_lower:
                     data['luong_dong'] = num_val
                 
-                # BHXH = Các khoản Người Lao Động phải nộp cho CQNN - Tổng cộng
                 if 'người lao động phải nộp' in col_lower and 'tổng cộng' in col_lower:
                     data['bhxh'] = num_val
                 elif 'nld phải nộp' in col_lower and 'tổng cộng' in col_lower:
                     data['bhxh'] = num_val
                 
-                # Đoàn phí = Kinh phí Công Đoàn - Phí đoàn viên
                 if 'kinh phí công đoàn' in col_lower and 'phí đoàn viên' in col_lower:
                     data['doan_phi'] = num_val
                 elif 'phí đoàn viên' in col_lower and data['doan_phi'] == 0:
                     data['doan_phi'] = num_val
                 
-                # Thuế TNCN = Thuế TNCN - Thuế TNCN phải nộp
-                # Match: column contains "Thuế TNCN phải nộp" but NOT the multi-bracket columns
                 if 'thuế tncn phải nộp' in col_lower and 'tr' not in col_lower and '%' not in col_lower:
                     data['thue_tncn'] = num_val
     
-    # Calculate total deductions automatically
     data['tong_khoan_tru'] = data['bhxh'] + data['doan_phi'] + data['thue_tncn']
-    
-    # Tổng Cộng Thu Nhập = Lương thực tế (same as Thuế TNCN - Tổng Thu Nhập)
     data['tong_thu_nhap'] = data['luong_thuc_te']
-    
-    # Tổng Số Tiền Lương Thực Nhận = Tổng Cộng Thu Nhập - Tổng Cộng Khoản Trừ
     data['luong_thuc_nhan'] = data['tong_thu_nhap'] - data['tong_khoan_tru']
     
     return data
+
+
+def generate_excel_salary_slip(employee_index, month, year):
+    """Generate Excel salary slip and return as bytes"""
+    df_info = data_store['thong_tin']
+    df_luong = data_store['luong']
+    
+    if employee_index >= len(df_info):
+        return None, None
+    
+    employee = df_info.iloc[employee_index]
+    name_col = find_employee_name_column(df_info)
+    employee_name = employee[name_col] if name_col else f'NhanVien_{employee_index}'
+    
+    salary_row = None
+    if df_luong is not None and name_col:
+        luong_name_col = find_employee_name_column(df_luong)
+        if luong_name_col:
+            salary_match = df_luong[df_luong[luong_name_col].astype(str).str.lower().str.strip() == str(employee_name).lower().strip()]
+            if len(salary_match) > 0:
+                salary_row = salary_match.iloc[0]
+    
+    slip_data = get_salary_slip_data(employee, salary_row, df_info, df_luong)
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Phiếu Lương"
+    
+    title_font = Font(bold=True, size=16, color="FF0000")
+    header_font = Font(bold=True, size=11)
+    border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin')
+    )
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    light_yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+    orange_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+    light_blue_fill = PatternFill(start_color="DAEEF3", end_color="DAEEF3", fill_type="solid")
+    light_green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 25
+    ws.column_dimensions['D'].width = 25
+    ws.column_dimensions['E'].width = 25
+    
+    ws.merge_cells('A1:E1')
+    ws['A1'] = f"PHIẾU LƯƠNG THÁNG {month} NĂM {year}"
+    ws['A1'].font = title_font
+    ws['A1'].alignment = Alignment(horizontal='center')
+    
+    row = 3
+    info_rows = [
+        ('Họ tên:', slip_data['ho_ten'], 'Ngày công chuẩn:', ''),
+        ('Lương thỏa thuận:', format_number(slip_data['luong_thoa_thuan']), 'Ngày công thực tế:', ''),
+        ('% Lương Thử việc:', '', 'Nghỉ phép:', ''),
+        ('Lương đóng:', format_number(slip_data['luong_dong']), 'Tổng giờ tăng ca:', ''),
+        ('Số tài khoản:', slip_data['so_tai_khoan'], 'Tên ngân hàng:', slip_data['ten_ngan_hang']),
+    ]
+    
+    for info in info_rows:
+        ws[f'A{row}'] = info[0]
+        ws[f'A{row}'].font = header_font
+        ws[f'A{row}'].fill = yellow_fill
+        ws[f'A{row}'].border = border
+        
+        ws[f'B{row}'] = info[1]
+        ws[f'B{row}'].border = border
+        
+        ws[f'C{row}'] = info[2]
+        ws[f'C{row}'].font = header_font
+        ws[f'C{row}'].fill = yellow_fill
+        ws[f'C{row}'].border = border
+        
+        ws.merge_cells(f'D{row}:E{row}')
+        ws[f'D{row}'] = info[3]
+        ws[f'D{row}'].border = border
+        ws[f'E{row}'].border = border
+        
+        row += 1
+    
+    row += 1
+    ws[f'A{row}'] = 'STT'
+    ws[f'A{row}'].font = header_font
+    ws[f'A{row}'].fill = orange_fill
+    ws[f'A{row}'].border = border
+    ws[f'A{row}'].alignment = Alignment(horizontal='center')
+    
+    ws.merge_cells(f'B{row}:C{row}')
+    ws[f'B{row}'] = 'Các Khoản Thu Nhập'
+    ws[f'B{row}'].font = header_font
+    ws[f'B{row}'].fill = orange_fill
+    ws[f'B{row}'].border = border
+    ws[f'B{row}'].alignment = Alignment(horizontal='center')
+    ws[f'C{row}'].border = border
+    
+    ws.merge_cells(f'D{row}:E{row}')
+    ws[f'D{row}'] = 'Các Khoản Trừ Vào Lương'
+    ws[f'D{row}'].font = header_font
+    ws[f'D{row}'].fill = orange_fill
+    ws[f'D{row}'].border = border
+    ws[f'D{row}'].alignment = Alignment(horizontal='center')
+    ws[f'E{row}'].border = border
+    
+    table_data = [
+        ('1', 'Lương thực tế', format_number(slip_data['luong_thuc_te']), 'BHXH', format_number(slip_data['bhxh'])),
+        ('2', 'Phép năm', '', 'Đoàn phí', format_number(slip_data['doan_phi'])),
+        ('3', 'Lương tăng ca', '', 'Thuế Thu Nhập Cá Nhân', format_number(slip_data['thue_tncn'])),
+        ('4', 'Lương bổ sung', '', 'Tạm Ứng', ''),
+        ('5', 'Giữ xe', '', 'Tiền phạt', ''),
+        ('6', 'Công tác phí', '', 'Khác', ''),
+    ]
+    
+    row += 1
+    for data_row in table_data:
+        ws[f'A{row}'] = data_row[0]
+        ws[f'A{row}'].border = border
+        ws[f'A{row}'].alignment = Alignment(horizontal='center')
+        ws[f'A{row}'].fill = light_blue_fill
+        
+        ws[f'B{row}'] = data_row[1]
+        ws[f'B{row}'].border = border
+        ws[f'B{row}'].fill = light_blue_fill
+        
+        ws[f'C{row}'] = data_row[2]
+        ws[f'C{row}'].border = border
+        ws[f'C{row}'].fill = light_green_fill
+        
+        ws[f'D{row}'] = data_row[3]
+        ws[f'D{row}'].border = border
+        ws[f'D{row}'].fill = light_blue_fill
+        
+        ws[f'E{row}'] = data_row[4]
+        ws[f'E{row}'].border = border
+        ws[f'E{row}'].fill = light_green_fill
+        
+        row += 1
+    
+    ws[f'A{row}'] = ''
+    ws[f'A{row}'].border = border
+    
+    ws[f'B{row}'] = 'Tổng Cộng Thu Nhập'
+    ws[f'B{row}'].font = header_font
+    ws[f'B{row}'].border = border
+    ws[f'B{row}'].fill = yellow_fill
+    
+    ws[f'C{row}'] = format_number(slip_data['tong_thu_nhap'])
+    ws[f'C{row}'].border = border
+    ws[f'C{row}'].fill = light_yellow_fill
+    
+    ws[f'D{row}'] = 'Tổng Cộng Khoản Trừ'
+    ws[f'D{row}'].font = header_font
+    ws[f'D{row}'].border = border
+    ws[f'D{row}'].fill = yellow_fill
+    
+    ws[f'E{row}'] = format_number(slip_data['tong_khoan_tru'])
+    ws[f'E{row}'].border = border
+    ws[f'E{row}'].fill = light_yellow_fill
+    
+    row += 1
+    ws.merge_cells(f'A{row}:D{row}')
+    ws[f'A{row}'] = 'Tổng Số Tiền Lương Thực Nhận'
+    ws[f'A{row}'].font = Font(bold=True, size=12, color="FF0000")
+    ws[f'A{row}'].border = border
+    ws[f'A{row}'].fill = yellow_fill
+    ws[f'A{row}'].alignment = Alignment(horizontal='center')
+    ws[f'B{row}'].border = border
+    ws[f'C{row}'].border = border
+    ws[f'D{row}'].border = border
+    
+    ws[f'E{row}'] = format_number(slip_data['luong_thuc_nhan'])
+    ws[f'E{row}'].font = Font(bold=True, size=12, color="FF0000")
+    ws[f'E{row}'].border = border
+    ws[f'E{row}'].fill = light_yellow_fill
+    
+    row += 2
+    ws.merge_cells(f'A{row}:E{row}')
+    ws[f'A{row}'] = "Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng"
+    ws[f'A{row}'].font = Font(size=9, italic=True)
+    
+    row += 1
+    ws.merge_cells(f'A{row}:E{row}')
+    ws[f'A{row}'] = "24 giờ (kể từ thời điểm nhận được thông báo này) để được giải quyết."
+    ws[f'A{row}'].font = Font(size=9, italic=True)
+    
+    row += 1
+    ws.merge_cells(f'A{row}:E{row}')
+    ws[f'A{row}'] = "Quá thời hạn trên, thông tin trên phiếu lương sẽ được xem là chính xác và không có khiếu nại. Trân trọng cảm ơn!"
+    ws[f'A{row}'].font = Font(size=9, italic=True)
+    
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    safe_name = "".join(c for c in str(employee_name) if c.isalnum() or c in (' ', '_')).strip()
+    filename = f"PhieuLuong_{safe_name}_Thang{month}_{year}.xlsx"
+    
+    return output.getvalue(), filename
+
+
+def generate_pdf_salary_slip(employee_index, month, year):
+    """Generate PDF salary slip with Vietnamese support and return as bytes"""
+    df_info = data_store['thong_tin']
+    df_luong = data_store['luong']
+    
+    if employee_index >= len(df_info):
+        return None, None
+    
+    employee = df_info.iloc[employee_index]
+    name_col = find_employee_name_column(df_info)
+    employee_name = employee[name_col] if name_col else f'NhanVien_{employee_index}'
+    
+    salary_row = None
+    if df_luong is not None and name_col:
+        luong_name_col = find_employee_name_column(df_luong)
+        if luong_name_col:
+            salary_match = df_luong[df_luong[luong_name_col].astype(str).str.lower().str.strip() == str(employee_name).lower().strip()]
+            if len(salary_match) > 0:
+                salary_row = salary_match.iloc[0]
+    
+    slip_data = get_salary_slip_data(employee, salary_row, df_info, df_luong)
+    
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, topMargin=1*cm, bottomMargin=1*cm, leftMargin=1*cm, rightMargin=1*cm)
+    
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Use Vietnamese font if available
+    font_name = 'DejaVuSans' if VIETNAMESE_FONT_AVAILABLE else 'Helvetica'
+    
+    # Helper function for text - use Vietnamese if font available
+    def vn_text(text):
+        if VIETNAMESE_FONT_AVAILABLE:
+            return str(text)
+        return remove_accents(str(text))
+    
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontName=font_name,
+        fontSize=16,
+        alignment=1,
+        spaceAfter=20,
+        textColor=colors.red
+    )
+    
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=10
+    )
+    
+    note_style = ParagraphStyle(
+        'CustomNote',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=8,
+        italic=True
+    )
+    
+    # Title
+    title_text = f"PHIẾU LƯƠNG THÁNG {month} NĂM {year}" if VIETNAMESE_FONT_AVAILABLE else f"PHIEU LUONG THANG {month} NAM {year}"
+    elements.append(Paragraph(title_text, title_style))
+    elements.append(Spacer(1, 10))
+    
+    # Info table
+    info_data = [
+        [vn_text('Họ tên:'), vn_text(slip_data['ho_ten']), vn_text('Ngày công chuẩn:'), ''],
+        [vn_text('Lương thỏa thuận:'), format_number(slip_data['luong_thoa_thuan']), vn_text('Ngày công thực tế:'), ''],
+        [vn_text('% Lương Thử việc:'), '', vn_text('Nghỉ phép:'), ''],
+        [vn_text('Lương đóng:'), format_number(slip_data['luong_dong']), vn_text('Tổng giờ tăng ca:'), ''],
+        [vn_text('Số tài khoản:'), slip_data['so_tai_khoan'], vn_text('Tên ngân hàng:'), vn_text(slip_data['ten_ngan_hang'])],
+    ]
+    
+    info_table = Table(info_data, colWidths=[3.5*cm, 5*cm, 4*cm, 5*cm])
+    info_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.yellow),
+        ('BACKGROUND', (2, 0), (2, -1), colors.yellow),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTNAME', (0, 0), (-1, -1), font_name),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(info_table)
+    elements.append(Spacer(1, 15))
+    
+    # Main table
+    table_header = [
+        ['STT', vn_text('Các Khoản Thu Nhập'), '', vn_text('Các Khoản Trừ Vào Lương'), '']
+    ]
+    
+    table_data = [
+        ['1', vn_text('Lương thực tế'), format_number(slip_data['luong_thuc_te']), 'BHXH', format_number(slip_data['bhxh'])],
+        ['2', vn_text('Phép năm'), '', vn_text('Đoàn phí'), format_number(slip_data['doan_phi'])],
+        ['3', vn_text('Lương tăng ca'), '', vn_text('Thuế Thu Nhập Cá Nhân'), format_number(slip_data['thue_tncn'])],
+        ['4', vn_text('Lương bổ sung'), '', vn_text('Tạm Ứng'), ''],
+        ['5', vn_text('Giữ xe'), '', vn_text('Tiền phạt'), ''],
+        ['6', vn_text('Công tác phí'), '', vn_text('Khác'), ''],
+    ]
+    
+    totals_data = [
+        ['', vn_text('Tổng Cộng Thu Nhập'), format_number(slip_data['tong_thu_nhap']), 
+         vn_text('Tổng Cộng Khoản Trừ'), format_number(slip_data['tong_khoan_tru'])],
+    ]
+    
+    full_table_data = table_header + table_data + totals_data
+    
+    main_table = Table(full_table_data, colWidths=[1.5*cm, 4.5*cm, 3.5*cm, 4.5*cm, 3.5*cm])
+    main_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#FFC000')),
+        ('SPAN', (1, 0), (2, 0)),
+        ('SPAN', (3, 0), (4, 0)),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, -1), font_name),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        
+        ('BACKGROUND', (0, 1), (0, -2), colors.HexColor('#DAEEF3')),
+        ('BACKGROUND', (1, 1), (1, -2), colors.HexColor('#DAEEF3')),
+        ('BACKGROUND', (2, 1), (2, -2), colors.HexColor('#E2EFDA')),
+        ('BACKGROUND', (3, 1), (3, -2), colors.HexColor('#DAEEF3')),
+        ('BACKGROUND', (4, 1), (4, -2), colors.HexColor('#E2EFDA')),
+        
+        ('BACKGROUND', (1, -1), (1, -1), colors.yellow),
+        ('BACKGROUND', (3, -1), (3, -1), colors.yellow),
+        ('BACKGROUND', (2, -1), (2, -1), colors.HexColor('#FFFFCC')),
+        ('BACKGROUND', (4, -1), (4, -1), colors.HexColor('#FFFFCC')),
+        
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(main_table)
+    elements.append(Spacer(1, 5))
+    
+    # Net salary row
+    net_data = [[vn_text('Tổng Số Tiền Lương Thực Nhận'), format_number(slip_data['luong_thuc_nhan'])]]
+    net_table = Table(net_data, colWidths=[14*cm, 3.5*cm])
+    net_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, 0), colors.yellow),
+        ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#FFFFCC')),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTNAME', (0, 0), (-1, -1), font_name),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.red),
+        ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+        ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(net_table)
+    
+    # Footer note
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph(vn_text("Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng"), note_style))
+    elements.append(Paragraph(vn_text("24 giờ (kể từ thời điểm nhận được thông báo này) để được giải quyết."), note_style))
+    elements.append(Paragraph(vn_text("Quá thời hạn trên, thông tin trên phiếu lương sẽ được xem là chính xác và không có khiếu nại. Trân trọng cảm ơn!"), note_style))
+    
+    doc.build(elements)
+    output.seek(0)
+    
+    safe_name = "".join(c for c in str(employee_name) if c.isalnum() or c in (' ', '_')).strip()
+    filename = f"PhieuLuong_{safe_name}_Thang{month}_{year}.pdf"
+    
+    return output.getvalue(), filename
+
+
+def send_email_with_attachment(to_email, subject, body, attachment_data, attachment_filename):
+    """Send email with attachment using SMTP"""
+    if not EMAIL_CONFIG['sender_email'] or not EMAIL_CONFIG['sender_password']:
+        return False, "Chưa cấu hình email gửi. Vui lòng cấu hình SMTP_SERVER, SENDER_EMAIL, SENDER_PASSWORD."
+    
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_CONFIG['sender_email']
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        attachment = MIMEBase('application', 'octet-stream')
+        attachment.set_payload(attachment_data)
+        encoders.encode_base64(attachment)
+        attachment.add_header('Content-Disposition', f'attachment; filename="{attachment_filename}"')
+        msg.attach(attachment)
+        
+        server = smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port'])
+        server.starttls()
+        server.login(EMAIL_CONFIG['sender_email'], EMAIL_CONFIG['sender_password'])
+        server.send_message(msg)
+        server.quit()
+        
+        return True, "Email đã gửi thành công!"
+    except Exception as e:
+        return False, f"Lỗi gửi email: {str(e)}"
 
 
 @app.route('/')
@@ -412,12 +810,17 @@ def index():
     columns_luong = data_store['columns_luong'] if data_store['luong'] is not None else []
     has_data = data_store['thong_tin'] is not None
     employees_list = data_store['employees_list']
+    email_status = data_store['email_status']
+    
+    email_configured = bool(EMAIL_CONFIG['sender_email'] and EMAIL_CONFIG['sender_password'])
     
     return render_template('index.html', 
                          columns_info=columns_info,
                          columns_luong=columns_luong,
                          has_data=has_data,
-                         employees_list=employees_list)
+                         employees_list=employees_list,
+                         email_status=email_status,
+                         email_configured=email_configured)
 
 
 @app.route('/upload', methods=['POST'])
@@ -435,10 +838,8 @@ def upload_file():
         return jsonify({'success': False, 'error': 'Chỉ hỗ trợ file Excel (.xlsx, .xls)'})
     
     try:
-        # Read Excel file
         xlsx = pd.ExcelFile(file)
         
-        # Process sheets
         for sheet_name in xlsx.sheet_names:
             df = pd.read_excel(xlsx, sheet_name=sheet_name, header=None)
             df_cleaned = clean_dataframe(df, sheet_name)
@@ -450,6 +851,9 @@ def upload_file():
             elif 'lương' in sheet_name.lower() or 'luong' in sheet_name.lower():
                 data_store['luong'] = df_cleaned
                 data_store['columns_luong'] = [col for col in df_cleaned.columns if is_valid_column(col)]
+        
+        # Reset email status on new upload
+        data_store['email_status'] = {}
         
         return jsonify({
             'success': True,
@@ -479,20 +883,26 @@ def get_employee(employee_index):
     
     employee = df_info.iloc[employee_index]
     name_col = find_employee_name_column(df_info)
+    email_col = find_employee_email_column(df_info)
     
     employee_data = {
         'index': employee_index,
-        'info': {}
+        'info': {},
+        'email': None,
+        'email_status': data_store['email_status'].get(employee_index)
     }
     
-    # Get info data
+    if email_col and email_col in employee.index:
+        email = employee[email_col]
+        if pd.notna(email) and '@' in str(email):
+            employee_data['email'] = str(email).strip()
+    
     for col in df_info.columns:
         if is_valid_column(col):
             val = employee[col]
             if pd.notna(val):
                 employee_data['info'][col] = str(val)
     
-    # Get salary data if available
     if df_luong is not None and name_col:
         employee_name = employee[name_col]
         luong_name_col = find_employee_name_column(df_luong)
@@ -520,7 +930,6 @@ def search_employee():
     
     data = request.get_json()
     search_term = data.get('search_term', '').strip()
-    search_fields = data.get('search_fields', [])
     
     if not search_term:
         return jsonify({'success': False, 'error': 'Vui lòng nhập từ khóa tìm kiếm'})
@@ -528,43 +937,40 @@ def search_employee():
     df_info = data_store['thong_tin']
     df_luong = data_store['luong']
     
-    # Search in thong_tin
     mask = pd.Series([False] * len(df_info))
     
-    if not search_fields:
-        # Search in all columns
-        for col in df_info.columns:
-            if is_valid_column(col):
-                mask = mask | df_info[col].astype(str).str.lower().str.contains(search_term.lower(), na=False)
-    else:
-        # Search in specific fields
-        for field in search_fields:
-            if field in df_info.columns:
-                mask = mask | df_info[field].astype(str).str.lower().str.contains(search_term.lower(), na=False)
+    for col in df_info.columns:
+        if is_valid_column(col):
+            mask = mask | df_info[col].astype(str).str.lower().str.contains(search_term.lower(), na=False)
     
     results = df_info[mask]
     
     if len(results) == 0:
         return jsonify({'success': False, 'error': 'Không tìm thấy kết quả'})
     
-    # Format results
     results_list = []
     name_col = find_employee_name_column(df_info)
+    email_col = find_employee_email_column(df_info)
     
     for idx, row in results.iterrows():
         employee_data = {
             'index': int(idx),
-            'info': {}
+            'info': {},
+            'email': None,
+            'email_status': data_store['email_status'].get(int(idx))
         }
         
-        # Get info data
+        if email_col and email_col in row.index:
+            email = row[email_col]
+            if pd.notna(email) and '@' in str(email):
+                employee_data['email'] = str(email).strip()
+        
         for col in df_info.columns:
             if is_valid_column(col):
                 val = row[col]
                 if pd.notna(val):
                     employee_data['info'][col] = str(val)
         
-        # Get salary data if available
         if df_luong is not None and name_col:
             employee_name = row[name_col]
             luong_name_col = find_employee_name_column(df_luong)
@@ -589,231 +995,22 @@ def search_employee():
 
 @app.route('/export/excel/<int:employee_index>', methods=['GET', 'POST'])
 def export_excel(employee_index):
-    """Export employee salary slip to Excel with specific template"""
+    """Export employee salary slip to Excel"""
     if data_store['thong_tin'] is None:
         return jsonify({'success': False, 'error': 'Không có dữ liệu'})
     
     try:
-        df_info = data_store['thong_tin']
-        df_luong = data_store['luong']
-        
-        if employee_index >= len(df_info):
-            return jsonify({'success': False, 'error': 'Không tìm thấy nhân viên'})
-        
-        # Get month and year from request
         now = datetime.now()
         month = request.args.get('month', now.month, type=int)
         year = request.args.get('year', now.year, type=int)
         
-        employee = df_info.iloc[employee_index]
-        name_col = find_employee_name_column(df_info)
-        employee_name = employee[name_col] if name_col else f'NhanVien_{employee_index}'
+        file_data, filename = generate_excel_salary_slip(employee_index, month, year)
         
-        # Get salary data
-        salary_row = None
-        if df_luong is not None and name_col:
-            luong_name_col = find_employee_name_column(df_luong)
-            if luong_name_col:
-                salary_match = df_luong[df_luong[luong_name_col].astype(str).str.lower().str.strip() == str(employee_name).lower().strip()]
-                if len(salary_match) > 0:
-                    salary_row = salary_match.iloc[0]
-        
-        # Get salary slip data
-        slip_data = get_salary_slip_data(employee, salary_row, df_info, df_luong)
-        
-        # Create workbook
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Phiếu Lương"
-        
-        # Styles
-        title_font = Font(bold=True, size=16, color="FF0000")
-        header_font = Font(bold=True, size=11)
-        normal_font = Font(size=10)
-        border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        light_yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
-        orange_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
-        light_blue_fill = PatternFill(start_color="DAEEF3", end_color="DAEEF3", fill_type="solid")
-        light_green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
-        
-        # Set column widths
-        ws.column_dimensions['A'].width = 8
-        ws.column_dimensions['B'].width = 20
-        ws.column_dimensions['C'].width = 25
-        ws.column_dimensions['D'].width = 25
-        ws.column_dimensions['E'].width = 25
-        
-        # Title with selected month and year
-        ws.merge_cells('A1:E1')
-        ws['A1'] = f"PHIẾU LƯƠNG THÁNG {month} NĂM {year}"
-        ws['A1'].font = title_font
-        ws['A1'].alignment = Alignment(horizontal='center')
-        
-        # Info section header
-        row = 3
-        
-        # Left column info
-        info_rows = [
-            ('Họ tên:', slip_data['ho_ten'], 'Ngày công chuẩn:', ''),
-            ('Lương thỏa thuận:', format_number(slip_data['luong_thoa_thuan']), 'Ngày công thực tế:', ''),
-            ('% Lương Thử việc:', '', 'Nghỉ phép:', ''),
-            ('Lương đóng:', format_number(slip_data['luong_dong']), 'Tổng giờ tăng ca:', ''),
-            ('Số tài khoản:', slip_data['so_tai_khoan'], 'Tên ngân hàng:', slip_data['ten_ngan_hang']),
-        ]
-        
-        for info in info_rows:
-            ws[f'A{row}'] = info[0]
-            ws[f'A{row}'].font = header_font
-            ws[f'A{row}'].fill = yellow_fill
-            ws[f'A{row}'].border = border
-            
-            ws[f'B{row}'] = info[1]
-            ws[f'B{row}'].border = border
-            
-            ws[f'C{row}'] = info[2]
-            ws[f'C{row}'].font = header_font
-            ws[f'C{row}'].fill = yellow_fill
-            ws[f'C{row}'].border = border
-            
-            ws.merge_cells(f'D{row}:E{row}')
-            ws[f'D{row}'] = info[3]
-            ws[f'D{row}'].border = border
-            ws[f'E{row}'].border = border
-            
-            row += 1
-        
-        # Table header
-        row += 1
-        headers = ['STT', 'Các Khoản Thu Nhập', '', 'Các Khoản Trừ Vào Lương', '']
-        ws[f'A{row}'] = 'STT'
-        ws[f'A{row}'].font = header_font
-        ws[f'A{row}'].fill = orange_fill
-        ws[f'A{row}'].border = border
-        ws[f'A{row}'].alignment = Alignment(horizontal='center')
-        
-        ws.merge_cells(f'B{row}:C{row}')
-        ws[f'B{row}'] = 'Các Khoản Thu Nhập'
-        ws[f'B{row}'].font = header_font
-        ws[f'B{row}'].fill = orange_fill
-        ws[f'B{row}'].border = border
-        ws[f'B{row}'].alignment = Alignment(horizontal='center')
-        ws[f'C{row}'].border = border
-        
-        ws.merge_cells(f'D{row}:E{row}')
-        ws[f'D{row}'] = 'Các Khoản Trừ Vào Lương'
-        ws[f'D{row}'].font = header_font
-        ws[f'D{row}'].fill = orange_fill
-        ws[f'D{row}'].border = border
-        ws[f'D{row}'].alignment = Alignment(horizontal='center')
-        ws[f'E{row}'].border = border
-        
-        # Table data
-        table_data = [
-            ('1', 'Lương thực tế', format_number(slip_data['luong_thuc_te']), 'BHXH', format_number(slip_data['bhxh'])),
-            ('2', 'Phép năm', '', 'Đoàn phí', format_number(slip_data['doan_phi'])),
-            ('3', 'Lương tăng ca', '', 'Thuế Thu Nhập Cá Nhân', format_number(slip_data['thue_tncn'])),
-            ('4', 'Lương bổ sung', '', 'Tạm Ứng', ''),
-            ('5', 'Giữ xe', '', 'Tiền phạt', ''),
-            ('6', 'Công tác phí', '', 'Khác', ''),
-        ]
-        
-        row += 1
-        for data_row in table_data:
-            ws[f'A{row}'] = data_row[0]
-            ws[f'A{row}'].border = border
-            ws[f'A{row}'].alignment = Alignment(horizontal='center')
-            ws[f'A{row}'].fill = light_blue_fill
-            
-            ws[f'B{row}'] = data_row[1]
-            ws[f'B{row}'].border = border
-            ws[f'B{row}'].fill = light_blue_fill
-            
-            ws[f'C{row}'] = data_row[2]
-            ws[f'C{row}'].border = border
-            ws[f'C{row}'].fill = light_green_fill
-            
-            ws[f'D{row}'] = data_row[3]
-            ws[f'D{row}'].border = border
-            ws[f'D{row}'].fill = light_blue_fill
-            
-            ws[f'E{row}'] = data_row[4]
-            ws[f'E{row}'].border = border
-            ws[f'E{row}'].fill = light_green_fill
-            
-            row += 1
-        
-        # Totals row
-        ws[f'A{row}'] = ''
-        ws[f'A{row}'].border = border
-        
-        ws[f'B{row}'] = 'Tổng Cộng Thu Nhập'
-        ws[f'B{row}'].font = header_font
-        ws[f'B{row}'].border = border
-        ws[f'B{row}'].fill = yellow_fill
-        
-        ws[f'C{row}'] = format_number(slip_data['tong_thu_nhap'])
-        ws[f'C{row}'].border = border
-        ws[f'C{row}'].fill = light_yellow_fill
-        
-        ws[f'D{row}'] = 'Tổng Cộng Khoản Trừ'
-        ws[f'D{row}'].font = header_font
-        ws[f'D{row}'].border = border
-        ws[f'D{row}'].fill = yellow_fill
-        
-        ws[f'E{row}'] = format_number(slip_data['tong_khoan_tru'])
-        ws[f'E{row}'].border = border
-        ws[f'E{row}'].fill = light_yellow_fill
-        
-        # Net salary row - Tổng Số Tiền Lương Thực Nhận = Tổng Cộng Thu Nhập - Tổng Cộng Khoản Trừ
-        row += 1
-        ws.merge_cells(f'A{row}:D{row}')
-        ws[f'A{row}'] = 'Tổng Số Tiền Lương Thực Nhận'
-        ws[f'A{row}'].font = Font(bold=True, size=12, color="FF0000")
-        ws[f'A{row}'].border = border
-        ws[f'A{row}'].fill = yellow_fill
-        ws[f'A{row}'].alignment = Alignment(horizontal='center')
-        ws[f'B{row}'].border = border
-        ws[f'C{row}'].border = border
-        ws[f'D{row}'].border = border
-        
-        ws[f'E{row}'] = format_number(slip_data['luong_thuc_nhan'])
-        ws[f'E{row}'].font = Font(bold=True, size=12, color="FF0000")
-        ws[f'E{row}'].border = border
-        ws[f'E{row}'].fill = light_yellow_fill
-        
-        # Footer note
-        row += 2
-        ws.merge_cells(f'A{row}:E{row}')
-        ws[f'A{row}'] = "Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng"
-        ws[f'A{row}'].font = Font(size=9, italic=True)
-        
-        row += 1
-        ws.merge_cells(f'A{row}:E{row}')
-        ws[f'A{row}'] = "24 giờ (kể từ thời điểm nhận được thông báo này) để được giải quyết."
-        ws[f'A{row}'].font = Font(size=9, italic=True)
-        
-        row += 1
-        ws.merge_cells(f'A{row}:E{row}')
-        ws[f'A{row}'] = "Quá thời hạn trên, thông tin trên phiếu lương sẽ được xem là chính xác và không có khiếu nại. Trân trọng cảm ơn!"
-        ws[f'A{row}'].font = Font(size=9, italic=True)
-        
-        # Save to bytes
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        
-        # Clean filename with selected month and year
-        safe_name = "".join(c for c in str(employee_name) if c.isalnum() or c in (' ', '_')).strip()
-        filename = f"PhieuLuong_{safe_name}_Thang{month}_{year}.xlsx"
+        if file_data is None:
+            return jsonify({'success': False, 'error': 'Không tìm thấy nhân viên'})
         
         return send_file(
-            output,
+            io.BytesIO(file_data),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
             download_name=filename
@@ -821,167 +1018,27 @@ def export_excel(employee_index):
     
     except Exception as e:
         import traceback
-        return jsonify({'success': False, 'error': str(e) + '\n' + traceback.format_exc()})
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/export/pdf/<int:employee_index>', methods=['GET', 'POST'])
 def export_pdf(employee_index):
-    """Export employee salary slip to PDF with specific template"""
+    """Export employee salary slip to PDF with Vietnamese support"""
     if data_store['thong_tin'] is None:
         return jsonify({'success': False, 'error': 'Không có dữ liệu'})
     
     try:
-        df_info = data_store['thong_tin']
-        df_luong = data_store['luong']
-        
-        if employee_index >= len(df_info):
-            return jsonify({'success': False, 'error': 'Không tìm thấy nhân viên'})
-        
-        # Get month and year from request
         now = datetime.now()
         month = request.args.get('month', now.month, type=int)
         year = request.args.get('year', now.year, type=int)
         
-        employee = df_info.iloc[employee_index]
-        name_col = find_employee_name_column(df_info)
-        employee_name = employee[name_col] if name_col else f'NhanVien_{employee_index}'
+        file_data, filename = generate_pdf_salary_slip(employee_index, month, year)
         
-        # Get salary data
-        salary_row = None
-        if df_luong is not None and name_col:
-            luong_name_col = find_employee_name_column(df_luong)
-            if luong_name_col:
-                salary_match = df_luong[df_luong[luong_name_col].astype(str).str.lower().str.strip() == str(employee_name).lower().strip()]
-                if len(salary_match) > 0:
-                    salary_row = salary_match.iloc[0]
-        
-        # Get salary slip data
-        slip_data = get_salary_slip_data(employee, salary_row, df_info, df_luong)
-        
-        # Create PDF
-        output = io.BytesIO()
-        doc = SimpleDocTemplate(output, pagesize=A4, topMargin=1*cm, bottomMargin=1*cm, leftMargin=1*cm, rightMargin=1*cm)
-        
-        elements = []
-        styles = getSampleStyleSheet()
-        
-        # Custom styles
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=16,
-            alignment=1,
-            spaceAfter=20,
-            textColor=colors.red
-        )
-        
-        # Title with selected month and year
-        elements.append(Paragraph(f"PHIEU LUONG THANG {month} NAM {year}", title_style))
-        elements.append(Spacer(1, 10))
-        
-        # Info table
-        info_data = [
-            [remove_accents('Họ tên:'), remove_accents(slip_data['ho_ten']), remove_accents('Ngày công chuẩn:'), ''],
-            [remove_accents('Lương thỏa thuận:'), format_number(slip_data['luong_thoa_thuan']), remove_accents('Ngày công thực tế:'), ''],
-            [remove_accents('% Lương Thử việc:'), '', remove_accents('Nghỉ phép:'), ''],
-            [remove_accents('Lương đóng:'), format_number(slip_data['luong_dong']), remove_accents('Tổng giờ tăng ca:'), ''],
-            [remove_accents('Số tài khoản:'), slip_data['so_tai_khoan'], remove_accents('Tên ngân hàng:'), remove_accents(slip_data['ten_ngan_hang'])],
-        ]
-        
-        info_table = Table(info_data, colWidths=[3.5*cm, 5*cm, 4*cm, 5*cm])
-        info_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (0, -1), colors.yellow),
-            ('BACKGROUND', (2, 0), (2, -1), colors.yellow),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-        elements.append(info_table)
-        elements.append(Spacer(1, 15))
-        
-        # Main table
-        table_header = [
-            ['STT', remove_accents('Các Khoản Thu Nhập'), '', remove_accents('Các Khoản Trừ Vào Lương'), '']
-        ]
-        
-        table_data = [
-            ['1', remove_accents('Lương thực tế'), format_number(slip_data['luong_thuc_te']), 'BHXH', format_number(slip_data['bhxh'])],
-            ['2', remove_accents('Phép năm'), '', remove_accents('Đoàn phí'), format_number(slip_data['doan_phi'])],
-            ['3', remove_accents('Lương tăng ca'), '', remove_accents('Thuế Thu Nhập Cá Nhân'), format_number(slip_data['thue_tncn'])],
-            ['4', remove_accents('Lương bổ sung'), '', remove_accents('Tạm Ứng'), ''],
-            ['5', remove_accents('Giữ xe'), '', remove_accents('Tiền phạt'), ''],
-            ['6', remove_accents('Công tác phí'), '', remove_accents('Khác'), ''],
-        ]
-        
-        totals_data = [
-            ['', remove_accents('Tổng Cộng Thu Nhập'), format_number(slip_data['tong_thu_nhap']), 
-             remove_accents('Tổng Cộng Khoản Trừ'), format_number(slip_data['tong_khoan_tru'])],
-        ]
-        
-        full_table_data = table_header + table_data + totals_data
-        
-        main_table = Table(full_table_data, colWidths=[1.5*cm, 4.5*cm, 3.5*cm, 4.5*cm, 3.5*cm])
-        main_table.setStyle(TableStyle([
-            # Header row
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#FFC000')),
-            ('SPAN', (1, 0), (2, 0)),
-            ('SPAN', (3, 0), (4, 0)),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            
-            # Data rows
-            ('BACKGROUND', (0, 1), (0, -2), colors.HexColor('#DAEEF3')),
-            ('BACKGROUND', (1, 1), (1, -2), colors.HexColor('#DAEEF3')),
-            ('BACKGROUND', (2, 1), (2, -2), colors.HexColor('#E2EFDA')),
-            ('BACKGROUND', (3, 1), (3, -2), colors.HexColor('#DAEEF3')),
-            ('BACKGROUND', (4, 1), (4, -2), colors.HexColor('#E2EFDA')),
-            
-            # Totals row
-            ('BACKGROUND', (1, -1), (1, -1), colors.yellow),
-            ('BACKGROUND', (3, -1), (3, -1), colors.yellow),
-            ('BACKGROUND', (2, -1), (2, -1), colors.HexColor('#FFFFCC')),
-            ('BACKGROUND', (4, -1), (4, -1), colors.HexColor('#FFFFCC')),
-            
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('ALIGN', (0, 0), (0, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-        elements.append(main_table)
-        elements.append(Spacer(1, 5))
-        
-        # Net salary row - Tổng Số Tiền Lương Thực Nhận = Tổng Cộng Thu Nhập - Tổng Cộng Khoản Trừ
-        net_data = [[remove_accents('Tổng Số Tiền Lương Thực Nhận'), format_number(slip_data['luong_thuc_nhan'])]]
-        net_table = Table(net_data, colWidths=[14*cm, 3.5*cm])
-        net_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (0, 0), colors.yellow),
-            ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#FFFFCC')),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONTSIZE', (0, 0), (-1, -1), 11),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.red),
-            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
-            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-        elements.append(net_table)
-        
-        # Footer note
-        elements.append(Spacer(1, 20))
-        note_style = ParagraphStyle('Note', parent=styles['Normal'], fontSize=8, italic=True)
-        elements.append(Paragraph(remove_accents("Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng"), note_style))
-        elements.append(Paragraph(remove_accents("24 giờ (kể từ thời điểm nhận được thông báo này) để được giải quyết."), note_style))
-        elements.append(Paragraph(remove_accents("Quá thời hạn trên, thông tin trên phiếu lương sẽ được xem là chính xác và không có khiếu nại. Trân trọng cảm ơn!"), note_style))
-        
-        # Build PDF
-        doc.build(elements)
-        output.seek(0)
-        
-        # Clean filename with selected month and year
-        safe_name = "".join(c for c in str(employee_name) if c.isalnum() or c in (' ', '_')).strip()
-        filename = f"PhieuLuong_{safe_name}_Thang{month}_{year}.pdf"
+        if file_data is None:
+            return jsonify({'success': False, 'error': 'Không tìm thấy nhân viên'})
         
         return send_file(
-            output,
+            io.BytesIO(file_data),
             mimetype='application/pdf',
             as_attachment=True,
             download_name=filename
@@ -989,7 +1046,277 @@ def export_pdf(employee_index):
     
     except Exception as e:
         import traceback
-        return jsonify({'success': False, 'error': str(e) + '\n' + traceback.format_exc()})
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/export/bulk', methods=['POST'])
+def export_bulk():
+    """Export multiple salary slips as a zip file"""
+    if data_store['thong_tin'] is None:
+        return jsonify({'success': False, 'error': 'Không có dữ liệu'})
+    
+    try:
+        data = request.get_json()
+        indices = data.get('indices', [])  # List of employee indices, or 'all'
+        file_type = data.get('file_type', 'pdf')  # 'pdf' or 'excel'
+        month = data.get('month', datetime.now().month)
+        year = data.get('year', datetime.now().year)
+        
+        df_info = data_store['thong_tin']
+        
+        # Handle 'all' selection
+        if indices == 'all' or not indices:
+            indices = list(range(len(df_info)))
+        
+        # Create zip file in memory
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for idx in indices:
+                if idx < len(df_info):
+                    if file_type == 'excel':
+                        file_data, filename = generate_excel_salary_slip(idx, month, year)
+                    else:
+                        file_data, filename = generate_pdf_salary_slip(idx, month, year)
+                    
+                    if file_data:
+                        zip_file.writestr(filename, file_data)
+        
+        zip_buffer.seek(0)
+        
+        zip_filename = f"PhieuLuong_Thang{month}_{year}.zip"
+        
+        return send_file(
+            zip_buffer,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=zip_filename
+        )
+    
+    except Exception as e:
+        import traceback
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/send_email/<int:employee_index>', methods=['POST'])
+def send_email(employee_index):
+    """Send salary slip email to employee"""
+    if data_store['thong_tin'] is None:
+        return jsonify({'success': False, 'error': 'Không có dữ liệu'})
+    
+    try:
+        data = request.get_json()
+        month = data.get('month', datetime.now().month)
+        year = data.get('year', datetime.now().year)
+        file_type = data.get('file_type', 'pdf')
+        
+        df_info = data_store['thong_tin']
+        
+        if employee_index >= len(df_info):
+            return jsonify({'success': False, 'error': 'Không tìm thấy nhân viên'})
+        
+        employee = df_info.iloc[employee_index]
+        name_col = find_employee_name_column(df_info)
+        email_col = find_employee_email_column(df_info)
+        
+        if not email_col or email_col not in employee.index:
+            return jsonify({'success': False, 'error': 'Không tìm thấy cột email trong dữ liệu'})
+        
+        to_email = employee[email_col]
+        if not pd.notna(to_email) or '@' not in str(to_email):
+            return jsonify({'success': False, 'error': 'Email nhân viên không hợp lệ'})
+        
+        to_email = str(to_email).strip()
+        employee_name = employee[name_col] if name_col else f'Nhân viên {employee_index}'
+        
+        # Generate file
+        if file_type == 'excel':
+            file_data, filename = generate_excel_salary_slip(employee_index, month, year)
+        else:
+            file_data, filename = generate_pdf_salary_slip(employee_index, month, year)
+        
+        if not file_data:
+            return jsonify({'success': False, 'error': 'Không thể tạo phiếu lương'})
+        
+        # Prepare email
+        subject = f"Phiếu lương tháng {month}/{year}"
+        body = f"""Xin chào {employee_name},
+
+Phiếu lương tháng {month}/{year} được đính kèm bên dưới.
+
+Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng 24 giờ để được giải quyết.
+
+Trân trọng!"""
+        
+        # Send email
+        success, message = send_email_with_attachment(to_email, subject, body, file_data, filename)
+        
+        # Update status
+        data_store['email_status'][employee_index] = {
+            'sent': True,
+            'success': success,
+            'message': message,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'month': month,
+            'year': year
+        }
+        
+        return jsonify({
+            'success': success,
+            'message': message,
+            'email_status': data_store['email_status'][employee_index]
+        })
+    
+    except Exception as e:
+        import traceback
+        data_store['email_status'][employee_index] = {
+            'sent': True,
+            'success': False,
+            'message': str(e),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/send_email_bulk', methods=['POST'])
+def send_email_bulk():
+    """Send salary slips to multiple employees"""
+    if data_store['thong_tin'] is None:
+        return jsonify({'success': False, 'error': 'Không có dữ liệu'})
+    
+    try:
+        data = request.get_json()
+        indices = data.get('indices', [])
+        month = data.get('month', datetime.now().month)
+        year = data.get('year', datetime.now().year)
+        file_type = data.get('file_type', 'pdf')
+        
+        df_info = data_store['thong_tin']
+        
+        if indices == 'all' or not indices:
+            indices = list(range(len(df_info)))
+        
+        results = []
+        success_count = 0
+        fail_count = 0
+        
+        for idx in indices:
+            if idx < len(df_info):
+                employee = df_info.iloc[idx]
+                name_col = find_employee_name_column(df_info)
+                email_col = find_employee_email_column(df_info)
+                
+                employee_name = employee[name_col] if name_col else f'NV {idx}'
+                
+                if not email_col or email_col not in employee.index:
+                    fail_count += 1
+                    data_store['email_status'][idx] = {
+                        'sent': True, 'success': False, 
+                        'message': 'Không có email', 
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    results.append({'index': idx, 'name': employee_name, 'success': False, 'message': 'Không có email'})
+                    continue
+                
+                to_email = employee[email_col]
+                if not pd.notna(to_email) or '@' not in str(to_email):
+                    fail_count += 1
+                    data_store['email_status'][idx] = {
+                        'sent': True, 'success': False, 
+                        'message': 'Email không hợp lệ', 
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    results.append({'index': idx, 'name': employee_name, 'success': False, 'message': 'Email không hợp lệ'})
+                    continue
+                
+                to_email = str(to_email).strip()
+                
+                # Generate file
+                if file_type == 'excel':
+                    file_data, filename = generate_excel_salary_slip(idx, month, year)
+                else:
+                    file_data, filename = generate_pdf_salary_slip(idx, month, year)
+                
+                if not file_data:
+                    fail_count += 1
+                    results.append({'index': idx, 'name': employee_name, 'success': False, 'message': 'Không thể tạo file'})
+                    continue
+                
+                # Send email
+                subject = f"Phiếu lương tháng {month}/{year}"
+                body = f"""Xin chào {employee_name},
+
+Phiếu lương tháng {month}/{year} được đính kèm bên dưới.
+
+Anh/Chị vui lòng kiểm tra lại thông tin trên phiếu lương. Mọi thắc mắc vui lòng liên hệ Phòng HCNS trong vòng 24 giờ để được giải quyết.
+
+Trân trọng!"""
+                
+                success, message = send_email_with_attachment(to_email, subject, body, file_data, filename)
+                
+                data_store['email_status'][idx] = {
+                    'sent': True, 'success': success, 
+                    'message': message, 
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'month': month, 'year': year
+                }
+                
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                
+                results.append({'index': idx, 'name': employee_name, 'success': success, 'message': message})
+        
+        return jsonify({
+            'success': True,
+            'message': f'Đã gửi {success_count} email thành công, {fail_count} thất bại',
+            'results': results,
+            'success_count': success_count,
+            'fail_count': fail_count
+        })
+    
+    except Exception as e:
+        import traceback
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/email_status')
+def get_email_status():
+    """Get email status for all employees"""
+    return jsonify({
+        'success': True,
+        'email_status': data_store['email_status']
+    })
+
+
+@app.route('/configure_email', methods=['POST'])
+def configure_email():
+    """Configure email settings (runtime configuration)"""
+    try:
+        data = request.get_json()
+        
+        if 'smtp_server' in data:
+            EMAIL_CONFIG['smtp_server'] = data['smtp_server']
+        if 'smtp_port' in data:
+            EMAIL_CONFIG['smtp_port'] = int(data['smtp_port'])
+        if 'sender_email' in data:
+            EMAIL_CONFIG['sender_email'] = data['sender_email']
+        if 'sender_password' in data:
+            EMAIL_CONFIG['sender_password'] = data['sender_password']
+        
+        return jsonify({
+            'success': True,
+            'message': 'Cấu hình email đã được cập nhật',
+            'config': {
+                'smtp_server': EMAIL_CONFIG['smtp_server'],
+                'smtp_port': EMAIL_CONFIG['smtp_port'],
+                'sender_email': EMAIL_CONFIG['sender_email'],
+                'has_password': bool(EMAIL_CONFIG['sender_password'])
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/get_columns')
@@ -1003,7 +1330,6 @@ def get_columns():
 
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get('PORT', 5001))
     debug = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     app.run(debug=debug, host='0.0.0.0', port=port)

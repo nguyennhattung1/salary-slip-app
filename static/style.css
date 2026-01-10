@@ -614,6 +614,126 @@ header .subtitle {
   }
 }
 
+/* Email Summary Section */
+.email-summary-section {
+  background: #f8fafc;
+  border: 2px solid var(--primary-color);
+}
+
+.email-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.summary-stats {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.stat-item {
+  flex: 1;
+  min-width: 120px;
+  padding: 1rem;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.stat-total {
+  background: #e0e7ff;
+  border: 1px solid #818cf8;
+}
+
+.stat-sent {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+
+.stat-pending {
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+}
+
+.stat-failed {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+}
+
+.stat-label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-color);
+}
+
+.email-list-toggle {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.email-list-container {
+  margin-top: 1rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.email-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.email-status-table th,
+.email-status-table td {
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.email-status-table th {
+  background: #f1f5f9;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+.email-status-table tr:hover {
+  background: #f8fafc;
+}
+
+.status-pending {
+  color: #92400e;
+  background: #fef3c7;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.status-sent {
+  color: #166534;
+  background: #dcfce7;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.status-failed {
+  color: #991b1b;
+  background: #fef2f2;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
 /* Email Configuration Section */
 .email-config-section {
   background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);

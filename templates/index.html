@@ -20,12 +20,12 @@
 
       <!-- Upload Section -->
       <section class="card upload-section">
-        <h2>📁 Upload File Excel</h2>
+        <h2>Upload File Excel</h2>
         <form id="uploadForm" enctype="multipart/form-data">
           <div class="file-input-wrapper">
             <input type="file" id="fileInput" name="file" accept=".xlsx,.xls" />
             <label for="fileInput" class="file-label">
-              <span class="file-icon">📄</span>
+              <span class="file-icon">[FILE]</span>
               <span class="file-text">Chọn file Excel (.xlsx, .xls)</span>
             </label>
             <span id="fileName" class="file-name"></span>
@@ -40,13 +40,57 @@
         </div>
       </section>
 
+      <!-- Email Status Summary Section -->
+      <section class="card email-summary-section" id="emailSummarySection" style="display: none">
+        <h2>Trạng thái gửi Email</h2>
+        <div class="email-summary">
+          <div class="summary-stats">
+            <div class="stat-item stat-total">
+              <span class="stat-label">Tổng số:</span>
+              <span class="stat-value" id="statTotal">0</span>
+            </div>
+            <div class="stat-item stat-sent">
+              <span class="stat-label">Đã gửi:</span>
+              <span class="stat-value" id="statSent">0</span>
+            </div>
+            <div class="stat-item stat-pending">
+              <span class="stat-label">Chưa gửi:</span>
+              <span class="stat-value" id="statPending">0</span>
+            </div>
+            <div class="stat-item stat-failed">
+              <span class="stat-label">Thất bại:</span>
+              <span class="stat-value" id="statFailed">0</span>
+            </div>
+          </div>
+          <div class="email-list-toggle">
+            <button type="button" class="btn btn-secondary" onclick="showEmailList('all')">Xem tất cả</button>
+            <button type="button" class="btn btn-secondary" onclick="showEmailList('pending')">Xem chưa gửi</button>
+            <button type="button" class="btn btn-secondary" onclick="showEmailList('sent')">Xem đã gửi</button>
+          </div>
+          <div id="emailListContainer" class="email-list-container" style="display: none">
+            <table class="email-status-table">
+              <thead>
+                <tr>
+                  <th>STT</th>
+                  <th>Họ tên</th>
+                  <th>Email</th>
+                  <th>Trạng thái</th>
+                  <th>Thời gian</th>
+                </tr>
+              </thead>
+              <tbody id="emailListBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- Email Configuration Section -->
       <section
         class="card email-config-section"
         id="emailConfigSection"
         style="display: none"
       >
-        <h2>📧 Cấu hình Email</h2>
+        <h2>Cấu hình Email</h2>
         <div class="email-config-form">
           <div class="form-row">
             <div class="form-group">
@@ -92,7 +136,7 @@
               class="btn btn-primary"
               onclick="saveEmailConfig()"
             >
-              💾 Lưu cấu hình
+              Lưu cấu hình
             </button>
             <span id="emailConfigStatus" class="status-text"></span>
           </div>
@@ -111,7 +155,7 @@
 
       <!-- Bulk Actions Section -->
       <section class="card bulk-section" id="bulkSection" style="display: none">
-        <h2>⚡ Thao tác hàng loạt</h2>
+        <h2>Thao tác hàng loạt</h2>
         <div class="bulk-form">
           <div class="form-row">
             <div class="form-group">
@@ -136,14 +180,14 @@
               class="btn btn-excel"
               onclick="downloadAllSlips()"
             >
-              📥 Tải tất cả phiếu lương
+              Tải tất cả phiếu lương
             </button>
             <button
               type="button"
               class="btn btn-email"
               onclick="sendAllEmails()"
             >
-              📨 Gửi email tất cả
+              Gửi email tất cả
             </button>
           </div>
           <div id="bulkStatus" class="bulk-status" style="display: none"></div>
@@ -156,7 +200,7 @@
         id="employeeSection"
         style="display: none"
       >
-        <h2>👤 Chọn Nhân viên</h2>
+        <h2>Chọn Nhân viên</h2>
         <div class="employee-select-row">
           <select id="employeeSelect" class="employee-dropdown">
             <option value="">-- Chọn nhân viên --</option>
@@ -195,7 +239,7 @@
         id="resultsSection"
         style="display: none"
       >
-        <h2>📋 Thông tin Nhân viên</h2>
+        <h2>Thông tin Nhân viên</h2>
         <p class="result-count">
           Tìm thấy <span id="resultCount">0</span> kết quả
         </p>
@@ -258,9 +302,12 @@
                   document.getElementById('employeeSection').style.display = 'block';
                   document.getElementById('bulkSection').style.display = 'block';
                   document.getElementById('emailConfigSection').style.display = 'block';
+                  document.getElementById('emailSummarySection').style.display = 'block';
 
                   employeesList = data.employees_list || [];
+                  emailStatusMap = {};
                   updateEmployeeDropdown(employeesList);
+                  updateEmailSummary();
                   initDateSelectors();
               } else {
                   statusDiv.innerHTML = '<span class="error">' + data.error + '</span>';
@@ -270,7 +317,82 @@
           }
       });
 
-      // Update employee dropdown
+      // Update email summary stats
+      function updateEmailSummary() {
+          const total = employeesList.length;
+          let sent = 0;
+          let failed = 0;
+          
+          for (const emp of employeesList) {
+              const status = emailStatusMap[emp.index];
+              if (status) {
+                  if (status.success) {
+                      sent++;
+                  } else {
+                      failed++;
+                  }
+              }
+          }
+          
+          const pending = total - sent - failed;
+          
+          document.getElementById('statTotal').textContent = total;
+          document.getElementById('statSent').textContent = sent;
+          document.getElementById('statPending').textContent = pending;
+          document.getElementById('statFailed').textContent = failed;
+      }
+
+      // Show email list by filter
+      function showEmailList(filter) {
+          const container = document.getElementById('emailListContainer');
+          const tbody = document.getElementById('emailListBody');
+          container.style.display = 'block';
+          
+          let html = '';
+          let count = 0;
+          
+          employeesList.forEach((emp, idx) => {
+              const status = emailStatusMap[emp.index];
+              let statusText = 'Chưa gửi';
+              let statusClass = 'status-pending';
+              let timeText = '-';
+              
+              if (status) {
+                  if (status.success) {
+                      statusText = 'Đã gửi';
+                      statusClass = 'status-sent';
+                      timeText = status.time || '-';
+                  } else {
+                      statusText = 'Thất bại';
+                      statusClass = 'status-failed';
+                      timeText = status.time || '-';
+                  }
+              }
+              
+              // Apply filter
+              if (filter === 'pending' && status) return;
+              if (filter === 'sent' && (!status || !status.success)) return;
+              
+              count++;
+              html += `
+                  <tr>
+                      <td>${count}</td>
+                      <td>${emp.name}</td>
+                      <td>${emp.email || 'Không có'}</td>
+                      <td><span class="${statusClass}">${statusText}</span></td>
+                      <td>${timeText}</td>
+                  </tr>
+              `;
+          });
+          
+          if (!html) {
+              html = '<tr><td colspan="5" style="text-align:center">Không có dữ liệu</td></tr>';
+          }
+          
+          tbody.innerHTML = html;
+      }
+
+      // Update employee dropdown with email status
       function updateEmployeeDropdown(employees) {
           const select = document.getElementById('employeeSelect');
           select.innerHTML = '<option value="">-- Chọn nhân viên --</option>';
@@ -278,9 +400,19 @@
           employees.forEach(emp => {
               const option = document.createElement('option');
               option.value = emp.index;
-              let text = emp.name;
+              
+              // Show email status in dropdown
+              const status = emailStatusMap[emp.index];
+              let statusMark = '';
+              if (status) {
+                  statusMark = status.success ? ' [DA GUI]' : ' [THAT BAI]';
+              } else {
+                  statusMark = ' [CHUA GUI]';
+              }
+              
+              let text = emp.name + statusMark;
               if (emp.email) {
-                  text += ` (${emp.email})`;
+                  text += ` - ${emp.email}`;
               }
               option.textContent = text;
               select.appendChild(option);
@@ -382,12 +514,12 @@
       // Get email status badge
       function getEmailStatusBadge(emailStatus) {
           if (!emailStatus) {
-              return '<span class="badge badge-pending">Chưa gửi</span>';
+              return '<span class="badge badge-pending">CHUA GUI</span>';
           }
           if (emailStatus.success) {
-              return `<span class="badge badge-success">✓ Đã gửi (${emailStatus.time})</span>`;
+              return `<span class="badge badge-success">DA GUI - ${emailStatus.time}</span>`;
           }
-          return `<span class="badge badge-error" title="${emailStatus.message}">✗ Gửi thất bại</span>`;
+          return `<span class="badge badge-error" title="${emailStatus.message}">THAT BAI</span>`;
       }
 
       // Display search results
@@ -447,7 +579,7 @@
               // Export section with month/year selection
               html += `
                   <div class="result-section export-section">
-                      <h4>📥 Xuất Phiếu Lương</h4>
+                      <h4>Xuất Phiếu Lương</h4>
                       <div class="export-form">
                           <div class="date-selectors">
                               <div class="date-field">
@@ -465,10 +597,10 @@
                           </div>
                           <div class="export-buttons">
                               <button class="btn btn-excel" onclick="exportFile(${result.index}, 'excel')">
-                                  📊 Xuất Excel
+                                  Xuất Excel
                               </button>
                               <button class="btn btn-pdf" onclick="exportFile(${result.index}, 'pdf')">
-                                  📄 Xuất PDF
+                                  Xuất PDF
                               </button>
                           </div>
                       </div>
@@ -479,7 +611,7 @@
               if (employeeEmail) {
                   html += `
                       <div class="result-section email-section">
-                          <h4>📧 Gửi Email</h4>
+                          <h4>Gửi Email</h4>
                           <div class="email-form">
                               <p class="email-info">Email: <strong>${employeeEmail}</strong></p>
                               <div class="email-actions">
@@ -488,7 +620,7 @@
                                       <option value="excel">Excel</option>
                                   </select>
                                   <button class="btn btn-email" onclick="sendEmail(${result.index})" id="sendBtn_${result.index}">
-                                      📨 Gửi phiếu lương
+                                      Gửi phiếu lương
                                   </button>
                               </div>
                               <div id="emailStatus_${result.index}" class="email-result"></div>
@@ -498,8 +630,8 @@
               } else {
                   html += `
                       <div class="result-section email-section">
-                          <h4>📧 Gửi Email</h4>
-                          <p class="no-email">⚠️ Không tìm thấy email của nhân viên trong dữ liệu</p>
+                          <h4>Gửi Email</h4>
+                          <p class="no-email">Không tìm thấy email của nhân viên trong dữ liệu</p>
                       </div>
                   `;
               }
@@ -525,7 +657,7 @@
           const sendBtn = document.getElementById('sendBtn_' + index);
 
           sendBtn.disabled = true;
-          sendBtn.textContent = '⏳ Đang gửi...';
+          sendBtn.textContent = 'Đang gửi...';
           statusDiv.innerHTML = '<span class="loading">Đang gửi email...</span>';
 
           try {
@@ -543,7 +675,7 @@
               const data = await response.json();
 
               if (data.success) {
-                  statusDiv.innerHTML = '<span class="success">✓ ' + data.message + '</span>';
+                  statusDiv.innerHTML = '<span class="success">' + data.message + '</span>';
                   emailStatusMap[index] = data.email_status;
                   // Update badge
                   const card = sendBtn.closest('.result-card');
@@ -551,15 +683,18 @@
                   if (badgeWrapper) {
                       badgeWrapper.innerHTML = getEmailStatusBadge(data.email_status);
                   }
+                  // Update summary and dropdown
+                  updateEmailSummary();
+                  updateEmployeeDropdown(employeesList);
               } else {
-                  statusDiv.innerHTML = '<span class="error">✗ ' + (data.error || data.message) + '</span>';
+                  statusDiv.innerHTML = '<span class="error">' + (data.error || data.message) + '</span>';
               }
           } catch (error) {
-              statusDiv.innerHTML = '<span class="error">✗ Lỗi: ' + error.message + '</span>';
+              statusDiv.innerHTML = '<span class="error">Lỗi: ' + error.message + '</span>';
           }
 
           sendBtn.disabled = false;
-          sendBtn.textContent = '📨 Gửi phiếu lương';
+          sendBtn.textContent = 'Gửi phiếu lương';
       }
 
       // Save email configuration
@@ -586,14 +721,14 @@
               const data = await response.json();
 
               if (data.success) {
-                  statusSpan.textContent = '✓ ' + data.message;
+                  statusSpan.textContent = data.message;
                   statusSpan.className = 'status-text success';
               } else {
-                  statusSpan.textContent = '✗ ' + data.error;
+                  statusSpan.textContent = data.error;
                   statusSpan.className = 'status-text error';
               }
           } catch (error) {
-              statusSpan.textContent = '✗ Lỗi: ' + error.message;
+              statusSpan.textContent = 'Lỗi: ' + error.message;
               statusSpan.className = 'status-text error';
           }
       }
@@ -606,7 +741,7 @@
           const statusDiv = document.getElementById('bulkStatus');
 
           statusDiv.style.display = 'block';
-          statusDiv.innerHTML = '<span class="loading">⏳ Đang tạo file ZIP chứa tất cả phiếu lương...</span>';
+          statusDiv.innerHTML = '<span class="loading">Đang tạo file ZIP chứa tất cả phiếu lương...</span>';
 
           try {
               const response = await fetch('/export/bulk', {
@@ -632,13 +767,13 @@
                   a.click();
                   a.remove();
                   window.URL.revokeObjectURL(url);
-                  statusDiv.innerHTML = '<span class="success">✓ Đã tải xuống thành công!</span>';
+                  statusDiv.innerHTML = '<span class="success">Đã tải xuống thành công!</span>';
               } else {
                   const data = await response.json();
-                  statusDiv.innerHTML = '<span class="error">✗ ' + (data.error || 'Lỗi tải file') + '</span>';
+                  statusDiv.innerHTML = '<span class="error">' + (data.error || 'Lỗi tải file') + '</span>';
               }
           } catch (error) {
-              statusDiv.innerHTML = '<span class="error">✗ Lỗi: ' + error.message + '</span>';
+              statusDiv.innerHTML = '<span class="error">Lỗi: ' + error.message + '</span>';
           }
       }
 
@@ -654,7 +789,7 @@
           }
 
           statusDiv.style.display = 'block';
-          statusDiv.innerHTML = '<span class="loading">⏳ Đang gửi email cho tất cả nhân viên...</span>';
+          statusDiv.innerHTML = '<span class="loading">Đang gửi email cho tất cả nhân viên...</span>';
 
           try {
               const response = await fetch('/send_email_bulk', {
@@ -673,32 +808,34 @@
 
               if (data.success) {
                   let html = `<div class="bulk-result">
-                      <p class="success-summary">✓ ${data.message}</p>
+                      <p class="success-summary">${data.message}</p>
                       <div class="result-details">`;
 
                   data.results.forEach(r => {
                       const statusClass = r.success ? 'success' : 'error';
-                      const icon = r.success ? '✓' : '✗';
+                      const icon = r.success ? '[OK]' : '[X]';
                       html += `<div class="result-item ${statusClass}">${icon} ${r.name}: ${r.message}</div>`;
 
                       // Update email status map
-                      if (r.success) {
-                          emailStatusMap[r.index] = {
-                              sent: true,
-                              success: true,
-                              message: r.message,
-                              time: new Date().toLocaleString('vi-VN')
-                          };
-                      }
+                      emailStatusMap[r.index] = {
+                          sent: true,
+                          success: r.success,
+                          message: r.message,
+                          time: new Date().toLocaleString('vi-VN')
+                      };
                   });
 
                   html += '</div></div>';
                   statusDiv.innerHTML = html;
+                  
+                  // Update summary and dropdown
+                  updateEmailSummary();
+                  updateEmployeeDropdown(employeesList);
               } else {
-                  statusDiv.innerHTML = '<span class="error">✗ ' + data.error + '</span>';
+                  statusDiv.innerHTML = '<span class="error">' + data.error + '</span>';
               }
           } catch (error) {
-              statusDiv.innerHTML = '<span class="error">✗ Lỗi: ' + error.message + '</span>';
+              statusDiv.innerHTML = '<span class="error">Lỗi: ' + error.message + '</span>';
           }
       }
 
@@ -708,9 +845,11 @@
       document.getElementById('dataInfo').style.display = 'block';
       document.getElementById('bulkSection').style.display = 'block';
       document.getElementById('emailConfigSection').style.display = 'block';
+      document.getElementById('emailSummarySection').style.display = 'block';
       employeesList = {{ employees_list | tojson }};
       emailStatusMap = {{ email_status | tojson }};
       updateEmployeeDropdown(employeesList);
+      updateEmailSummary();
       initDateSelectors();
       {% endif %}
     </script>
